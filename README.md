@@ -54,6 +54,7 @@ python benchmark_sglang.py \
     --output-length 500 \
     --num-runs 10 \
     --warmup 2 \
+    --device auto \
     --backend both \
     --output benchmark_results.json
 ```
@@ -64,8 +65,15 @@ python benchmark_sglang.py \
 - `--output-length`: 输出长度 (默认: 500)
 - `--num-runs`: 测试运行次数 (默认: 10)
 - `--warmup`: Warmup 次数 (默认: 2)
+- `--device`: 推理设备类型 (auto/musa/cuda/cpu，默认: auto)
 - `--backend`: 测试后端 (sglang/vllm/both)
 - `--output`: 输出结果文件
+
+设备说明：
+- `--device auto`: 自动按 `torch_musa -> CUDA -> CPU` 顺序选择设备
+- `--device musa`: 在摩尔线程环境中显式指定 MUSA，适合 vLLM / vllm_musa 自动探测异常时使用
+- `--device cuda`: 在 NVIDIA CUDA 环境中显式指定 CUDA
+- `--device cpu`: 仅用于无加速卡环境下的兼容性测试
 
 ### 2. 性能分析
 
@@ -206,11 +214,14 @@ export MUSA_LAUNCH_BLOCKING=1  # 同步模式（调试时使用）
 
 ### 1. SGLang 无法加载
 - 检查 SGLang 是否正确安装
+- 当前脚本会自动兼容 `max_running_requests` 和 `max_num_reqs` 两种初始化参数
+- 如果仍然报 `ServerArgs.__init__() got an unexpected keyword argument ...`，说明开发环境里的 SGLang 分支接口又有变化，需要根据实际分支继续对齐参数名
 - 尝试使用 vLLM 后端进行对比测试
 
 ### 2. MUSA 设备不可用
 - 检查 `torch_musa` 是否安装
 - 运行 `python -c "import torch_musa; print(torch.musa.is_available())"` 检查
+- 如果 vLLM 报 `Device string must not be empty`，优先显式传 `--device musa`
 
 ### 3. 内存不足
 - 减少 `input-length` 或 `output-length`
