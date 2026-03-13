@@ -39,10 +39,12 @@ def resolve_model_path(model_path: str) -> str:
     """Resolve the model path to a directory that contains config.json."""
     path = Path(model_path).expanduser()
     if not path.exists():
-        return model_path
+        raise FileNotFoundError(f"模型路径不存在: {model_path}")
 
     if path.is_file():
-        return str(path.parent) if path.name == "config.json" else model_path
+        if path.name == "config.json":
+            return str(path.parent)
+        raise ValueError(f"--model-path 不是模型目录，也不是 config.json: {model_path}")
 
     if (path / "config.json").exists():
         return str(path)
@@ -66,10 +68,12 @@ def resolve_model_path(model_path: str) -> str:
         print("警告: 模型路径下存在多个 config.json，无法自动选择:")
         for candidate_dir in candidate_dirs[:5]:
             print(f"  - {candidate_dir}")
-        return model_path
+        raise ValueError("请把 --model-path 指到更精确的单个模型目录。")
 
-    print(f"警告: 模型路径下未找到 config.json: {model_path}")
-    return model_path
+    raise FileNotFoundError(
+        f"模型路径下未找到 config.json: {model_path}\n"
+        "请把 --model-path 指到真正的 Hugging Face 模型目录，或者传它的上层目录让脚本自动向下查找。"
+    )
 
 
 def parse_key_value_pairs(items: list[str]) -> dict[str, str]:
@@ -197,6 +201,17 @@ def terminate_process(process: subprocess.Popen | None) -> None:
     process.wait(timeout=10)
 
 
+def read_tail(path: Path, num_lines: int = 40) -> str:
+    if not path.exists():
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as file_obj:
+            lines = file_obj.readlines()
+    except OSError:
+        return ""
+    return "".join(lines[-num_lines:]).strip()
+
+
 def load_json_file(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as file_obj:
         return json.load(file_obj)
@@ -252,7 +267,19 @@ def benchmark_sglang(args, model_path: str) -> dict:
             print(f"使用现有 SGLang Server: {args.health_host}:{args.port}")
 
         print("等待 /health 就绪...")
-        if not wait_for_health(args.health_host, args.port, args.server_timeout):
+        start_time = time.time()
+        while time.time() - start_time < args.server_timeout:
+            if wait_for_health(args.health_host, args.port, 5):
+                break
+            if server_process is not None and server_process.poll() is not None:
+                log_tail = read_tail(server_log_path)
+                raise RuntimeError(
+                    "SGLang Server 在健康检查通过前已退出。\n"
+                    f"退出码: {server_process.returncode}\n"
+                    f"日志文件: {server_log_path}\n"
+                    f"最近日志:\n{log_tail or '(日志为空)'}"
+                )
+        else:
             raise RuntimeError(
                 f"SGLang 服务在 {args.server_timeout}s 内未就绪，请检查日志: {server_log_path}"
             )
@@ -331,7 +358,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", type=str, default="0.0.0.0", help="SGLang server host")
     parser.add_argument("--health-host", type=str, default="127.0.0.1", help="health check 使用的 host")
     parser.add_argument("--port", type=int, default=30001, help="SGLang server 端口")
-    parser.add_argument("--server-timeout", type=int, default=600, help="等待 server ready 的超时时间（秒）")
+    parser.add_argument("--server-timeout", type=int, default=2400, help="等待 server ready 的超时时间（秒）")
     parser.add_argument("--server-log", type=str, default=None, help="服务日志文件路径")
     parser.add_argument("--use-existing-server", action="store_true", help="不启动新服务，直接压测现有服务")
     parser.add_argument("--keep-server", action="store_true", help="脚本退出后保留当前脚本启动的服务")
@@ -347,7 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-path", type=str, default=None, help="sharegpt 等数据集路径")
     parser.add_argument("--max-concurrency", type=int, default=64, help="bench_serving 最大并发")
     parser.add_argument("--random-range-ratio", type=float, default=1.0, help="bench_serving --random-range-ratio")
-    parser.add_argument("--request-rate", type=float, default=None, help="可选的 bench_serving --request-rate")
+    parser.add_argument("--request-rate", type=float, default=1.6, help="可选的 bench_serving --request-rate")
     parser.add_argument("--random-image-num-images", type=int, default=None, help="VL 模型随机图片数")
     parser.add_argument("--random-image-resolution", type=str, default=None, help="VL 模型随机图片分辨率，例如 1148x112")
 

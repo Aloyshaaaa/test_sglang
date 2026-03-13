@@ -1,264 +1,241 @@
-# SGLang Qwen3-0.6B 推理测试工具
+# SGLang MUSA 自动化压测脚本
 
-针对摩尔线程 MUSA 环境的 Qwen3-0.6B 模型推理性能测试和分析工具。
+这个仓库现在的推荐入口是 shell 脚本，不再要求你手工先起服务、再手工跑 `bench_serving`。
 
-## 环境要求
+目标是只跑一个脚本，就能拿到类似下面这种原始压测输出：
 
-- Python 3.8+
-- PyTorch 2.0+
-- torch_musa (摩尔线程 MUSA 支持)
-- transformers
-- SGLang (可选)
-- vLLM (可选，用于对比测试)
-
-## 安装依赖
-
-```bash
-# 基础依赖
-pip install torch transformers accelerate
-
-# 摩尔线程 MUSA 支持
-pip install torch_musa
-
-# SGLang (如果需要)
-pip install sglang
-
-# vLLM (如果需要对比测试)
-pip install vllm
+```text
+============ Serving Benchmark Result ============
+Backend:                                 sglang
+Traffic request rate:                    1.6
+...
+Mean TTFT (ms):                          286.31
+P99 ITL (ms):                            380.31
+==================================================
 ```
+
+## 脚本说明
+
+- `run_all_tests.sh`
+  - 默认入口，当前直接转发到 `auto_benchmark.sh`
+- `auto_benchmark.sh`
+  - 一条命令完成：解析模型目录 -> 启动 `sglang.launch_server` -> 等 `/health` -> 执行 `sglang.bench_serving`
+- `launch_server.sh`
+  - 只负责启动 SGLang Server
+- `run_benchmark.sh`
+  - 只负责跑 `sglang.bench_serving`
+- `benchmark_sglang.py`
+  - 保留的 Python 包装脚本，已补成失败早报；如果模型目录不对或服务秒退，会直接报错
 
 ## 快速开始
 
-### 一键运行所有测试
+先给脚本执行权限：
 
 ```bash
-chmod +x run_all_tests.sh
-./run_all_tests.sh
+chmod +x run_all_tests.sh auto_benchmark.sh launch_server.sh run_benchmark.sh
 ```
 
-这将自动运行：
-1. 基准测试
-2. 性能分析
-3. 算子耗时分析
-
-结果将保存在 `results/test_YYYYMMDD_HHMMSS/` 目录下。
-
-## 单独运行测试
-
-### 1. 基准测试
+然后直接跑：
 
 ```bash
-python benchmark_sglang.py \
-    --model-path /workspace/models/Qwen3-0.6B \
-    --input-length 3000 \
-    --output-length 500 \
-    --num-runs 10 \
-    --warmup 2 \
-    --backend sglang \
-    --dataset-name random \
-    --max-concurrency 64 \
-    --port 30001 \
-    --tensor-parallel-size 1 \
-    --output benchmark_results.json
+MODEL_PATH=/workspace/models/Qwen3-0.6B ./run_all_tests.sh
 ```
 
-参数说明：
-- `--model-path`: 模型路径
-- `--input-length`: `bench_serving --random-input-len`
-- `--output-length`: `bench_serving --random-output-len`
-- `--num-runs`: 兼容旧参数名，等价于 `--num-prompts`
-- `--warmup`: 兼容旧参数名，等价于 `--warmup-requests`
-- `--dataset-name`: 数据集类型，Dense 模型用 `random`，VL 模型用 `random-image`
-- `--max-concurrency`: 压测最大并发
-- `--port`: SGLang Server 监听端口
-- `--tensor-parallel-size`: `launch_server` 的 TP 配置
-- `--backend`: 保留旧接口；当前脚本仅实现文档口径的 `sglang`
-- `--output`: 输出结果文件
-
-执行流程：
-- 脚本会先启动 `python -m sglang.launch_server`
-- 然后轮询 `http://127.0.0.1:<port>/health`
-- 健康检查通过后，执行 `python -m sglang.bench_serving`
-- 最终将 `bench_serving` 原始 JSON 和封装后的结果写入输出文件附近
-
-模型路径说明：
-- `--model-path` 最终需要指向一个包含 `config.json` 的 Hugging Face 模型目录
-- 如果传入的是上层目录，脚本会尝试自动向下查找唯一的 `config.json` 所在目录
-- 如果目录下存在多个 `config.json`，脚本会打印候选目录并要求手动指定更精确的路径
-
-数据集说明：
-- Dense 模型建议使用 `--dataset-name random`
-- VL 模型建议使用 `--dataset-name random-image --random-image-num-images 1 --random-image-resolution 1148x112`
-- 如果要跑真实对话数据，可使用 `--dataset-name sharegpt --dataset-path /data/model/ShareGPT.json`
-
-### 2. 性能分析
+如果你想显式指定更多参数，可以这样跑：
 
 ```bash
-python profile_inference.py \
-    --model-path /workspace/models/Qwen3-0.6B \
-    --input-length 3000 \
-    --output-length 500 \
-    --profile-iterations 5 \
-    --mode all \
-    --output profile_results.json
+MODEL_PATH=/workspace/models/Qwen3-0.6B \
+INPUT_LENGTH=3000 \
+OUTPUT_LENGTH=500 \
+NUM_PROMPTS=10 \
+WARMUP_REQUESTS=2 \
+MAX_CONCURRENCY=64 \
+REQUEST_RATE=1.6 \
+TENSOR_PARALLEL_SIZE=1 \
+SGLANG_PORT=30001 \
+./auto_benchmark.sh
 ```
 
-分析模式 (`--mode`)：
-- `profiler`: 仅 PyTorch Profiler 分析
-- `layer`: 仅逐层分析
-- `memory`: 仅内存分析
-- `all`: 全部分析
-
-### 3. 算子分析
+VL 模型示例：
 
 ```bash
-python analyze_operators.py \
-    --input profile_results.json \
-    --output operator_analysis_report.txt \
-    --viz-output operators_for_viz.json
+MODEL_PATH=/data/model/Qwen2___5-VL-72B-Instruct \
+MODEL_TYPE=vl \
+INPUT_LENGTH=1024 \
+OUTPUT_LENGTH=1024 \
+NUM_PROMPTS=128 \
+MAX_CONCURRENCY=64 \
+TENSOR_PARALLEL_SIZE=8 \
+./auto_benchmark.sh
 ```
 
-## 查看结果
-
-### 基准测试结果
+Dense 模型如果要跑 ShareGPT：
 
 ```bash
-cat benchmark_results.json | python -m json.tool
+MODEL_PATH=/data/model/Qwen3-32B \
+MODEL_TYPE=dense \
+DATASET_PATH=/data/model/ShareGPT.json \
+DATASET_NAME=sharegpt \
+TENSOR_PARALLEL_SIZE=8 \
+./auto_benchmark.sh
 ```
 
-关键指标：
-- `request_throughput`: 请求吞吐量 (req/s)
-- `input_throughput`: 输入吞吐量 (tok/s)
-- `output_throughput`: 输出吞吐量 (tok/s)
-- `mean_ttft_ms`: 平均首字延迟
-- `mean_e2e_latency_ms`: 平均端到端延迟
-- `concurrency`: bench 实测并发
+## 关键参数
 
-### 性能分析结果
+- `MODEL_PATH`
+  - 模型目录，既可以直接传真正的模型目录，也可以传它的上层目录
+- `MODEL_TYPE`
+  - `auto|dense|vl`
+  - 默认 `auto`，如果模型名里带 `VL/vl` 会自动按 VL 处理
+- `INPUT_LENGTH`
+  - 对应 `bench_serving --random-input-len`
+- `OUTPUT_LENGTH`
+  - 对应 `bench_serving --random-output-len`
+- `NUM_PROMPTS`
+  - 对应 `bench_serving --num-prompts`
+- `WARMUP_REQUESTS`
+  - 对应 `bench_serving --warmup-requests`
+- `MAX_CONCURRENCY`
+  - 对应 `bench_serving --max-concurrency`
+- `REQUEST_RATE`
+  - 对应 `bench_serving --request-rate`
+  - 默认 `1.6`
+- `TENSOR_PARALLEL_SIZE`
+  - 对应 `launch_server --tensor-parallel-size`
+- `MEM_FRACTION_STATIC`
+  - 对应 `launch_server --mem-fraction-static`
+- `CUDA_GRAPH_MAX_BS`
+  - 对应 `launch_server --cuda-graph-max-bs`
+- `ATTENTION_BACKEND`
+  - 对应 `launch_server --attention-backend`
+- `MAX_PREFILL_TOKENS`
+  - 可选，对应 `launch_server --max-prefill-tokens`
+- `SGLANG_PORT`
+  - 服务端口
+- `SERVER_TIMEOUT`
+  - 等待 `/health` 的超时时间，默认 `2400`
+- `USE_EXISTING_SERVER`
+  - 设成 `1` 时不启动新服务，直接复用已有服务压测
+- `KEEP_SERVER`
+  - 设成 `1` 时脚本退出后不自动停服务
 
-1. **Chrome Trace 可视化**
-   - 打开 Chrome 浏览器
-   - 访问 `chrome://tracing`
-   - 加载 `profiler_trace_musa.json`
+## 默认环境变量
 
-2. **统计报告**
-   ```bash
-   cat profiler_stats_musa.txt
-   ```
-
-### 算子分析报告
+脚本已经按你给的文档内置了这些 MUSA 环境变量：
 
 ```bash
-cat operator_analysis_report.txt
+SGLANG_TORCH_PROFILER_DIR=/tmp/
+MUSA_LAUNCH_BLOCKING=0
+MCCL_IB_GID_INDEX=3
+MCCL_NET_SHARED_BUFFERS=0
+MCCL_PROTOS=2
+GLOO_SOCKET_IFNAME=bond0
+TP_SOCKET_IFNAME=bond0
+SGL_DEEP_GEMM_BLOCK_M=128
+MUSA_VISIBLE_DEVICES=all
+SGLANG_USE_MTT=1
 ```
 
-报告包含：
-- 按类别统计的算子耗时
-- Top 20 耗时算子排序
-- 各类别详细算子列表
-- 优化建议
-
-## 输出文件说明
-
-### 基准测试
-- `benchmark_results.json` - 封装后的完整结果，包含 server 配置和 bench 指标
-- `benchmark_results.sglang.raw.json` - `sglang.bench_serving` 原始输出
-- `benchmark_results.server.log` - `sglang.launch_server` 日志
-- `benchmark_log.txt` - benchmark 脚本自身日志
-
-### 性能分析
-- `profile_results.json` - Profiler 结果
-- `profiler_trace_musa.json` - Chrome trace 文件
-- `profiler_stats_musa.txt` - 统计报告
-
-### 算子分析
-- `operator_analysis_report.txt` - 详细分析报告
-- `operators_for_viz.json` - 可视化数据
-
-## 优化建议
-
-根据算子分析报告，常见的优化方向：
-
-### 1. 矩阵运算优化
-- 使用 FP16/BF16 精度
-- 启用 Tensor Core
-- 使用优化的 GEMM 库
-
-### 2. 注意力机制优化
-- 使用 FlashAttention
-- 使用稀疏注意力
-- 优化 KV Cache
-
-### 3. 内存优化
-- 优化内存访问模式
-- 减少数据拷贝
-- 使用内存池
-
-### 4. 计算图优化
-- 算子融合
-- 消除冗余计算
-- 使用编译优化 (torch.compile)
-
-## 摩尔线程 MUSA 特定优化
-
-### 环境变量
+如果你们环境还需要：
 
 ```bash
-# 启用 MUSA 特定优化
-export MUSA_VISIBLE_DEVICES=0
-export PYTORCH_MUSA_ALLOC_CONF=max_split_size_mb:512
-
-# 调试信息
-export MUSA_LAUNCH_BLOCKING=1  # 同步模式（调试时使用）
+export NVSHMEM_HCA_PE_MAPPING="mlx5_bond_2:1:2,mlx5_bond_3:1:2,mlx5_bond_4:1:2,mlx5_bond_5:1:2"
 ```
 
-### 性能调优
+再执行脚本即可，脚本会继承它。
 
-1. **使用 FP16**
-   ```python
-   model = model.half()  # 转换为 FP16
-   ```
+## `config.json` 是什么
 
-2. **启用 TF32** (如果支持)
-   ```python
-   torch.backends.musa.matmul.allow_tf32 = True
-   ```
+`config.json` 是 Hugging Face 模型目录里的配置文件，`transformers`、`sglang`、`vllm` 都靠它识别模型结构。
 
-3. **优化内存分配**
-   ```python
-   import torch_musa
-   torch_musa.empty_cache()  # 清理缓存
-   ```
+常见情况：
 
-## 故障排除
+- 你传的是正确模型目录
+  - 目录下直接有 `config.json`
+- 你传的是上层目录
+  - 脚本会自动往下找 `config.json`
+- 你传的目录里根本没有模型
+  - 脚本会直接报错，不再傻等 `/health`
 
-### 1. SGLang 无法加载
-- 检查 SGLang 是否正确安装
-- 当前脚本会直接调用 `python -m sglang.launch_server`
-- 如果报 `Can't load the configuration of ...`，说明 `--model-path` 还没有指到真正包含 `config.json` 的模型目录
-- 如果 `/health` 一直不返回 200，请检查 `benchmark_results.server.log`
-- 对照 MUSA 文档检查环境变量：`SGLANG_USE_MTT=1`、`MUSA_VISIBLE_DEVICES=all`、`TP_SOCKET_IFNAME=bond0`
+## 输出文件
 
-### 2. MUSA 设备不可用
-- 检查 `torch_musa` 是否安装
-- 运行 `python -c "import torch_musa; print(torch.musa.is_available())"` 检查
-- 如果是多卡环境，检查 `MUSA_VISIBLE_DEVICES`、`tensor-parallel-size` 与实际卡数是否匹配
-- 如果网络初始化失败，检查 `GLOO_SOCKET_IFNAME`、`TP_SOCKET_IFNAME`、`MCCL_IB_GID_INDEX`
+每次运行会在 `results/benchmark_时间戳/` 下生成：
 
-### 3. 内存不足
-- 减少 `input-length` 或 `output-length`
-- 使用 `torch.float16` 而不是 `torch.float32`
-- 启用梯度检查点
+- `server.log`
+  - `sglang.launch_server` 日志
+- `bench.log`
+  - `sglang.bench_serving` 控制台日志
+- `bench_raw.json`
+  - `bench_serving --output-file` 原始 JSON
+- `run_config.env`
+  - 本次运行参数快照
 
-### 4. 性能异常
-- 检查是否启用了正确的设备同步
-- 确认模型已加载到 MUSA 设备
-- 检查是否有其他进程占用 GPU
+其中 `bench.log` 里就会有你要的 `Serving Benchmark Result` 原始汇总输出。
 
-## 贡献
+## 分步执行
 
-欢迎提交 Issue 和 PR！
+如果你要手动拆开跑，也可以：
 
-## 许可证
+先起服务：
 
-MIT License
+```bash
+MODEL_PATH=/data/model/Qwen2___5-VL-72B-Instruct \
+TENSOR_PARALLEL_SIZE=8 \
+./launch_server.sh
+```
+
+再单独压测：
+
+```bash
+MODEL_PATH=/data/model/Qwen2___5-VL-72B-Instruct \
+MODEL_TYPE=vl \
+INPUT_LENGTH=1024 \
+OUTPUT_LENGTH=1024 \
+NUM_PROMPTS=128 \
+MAX_CONCURRENCY=64 \
+./run_benchmark.sh
+```
+
+## 故障排查
+
+### 1. `/health` 一直不通
+
+优先看：
+
+```bash
+tail -n 100 results/benchmark_*/server.log
+```
+
+现在脚本如果发现服务进程在健康检查通过前就退出，会直接打印 `server.log` 的最后 40 行。
+
+### 2. 报模型目录没有 `config.json`
+
+说明 `MODEL_PATH` 还不是最终模型目录。你需要：
+
+- 传真正包含 `config.json` 的目录
+- 或者传它的上层目录，让脚本自动向下查找
+
+### 3. VL / Dense 数据集不对
+
+- VL 模型默认走 `random-image`
+- Dense 模型默认走 `random`
+- 如果你要用真实对话数据，手动传：
+  - `DATASET_NAME=sharegpt`
+  - `DATASET_PATH=/data/model/ShareGPT.json`
+
+### 4. 复用已有服务
+
+如果你已经手工起好了服务，不想让脚本重复启动：
+
+```bash
+USE_EXISTING_SERVER=1 MODEL_PATH=/data/model/Qwen3-32B ./auto_benchmark.sh
+```
+
+## 其他脚本
+
+- `profile_inference.py`
+  - 还保留着，用于 PyTorch Profiler 分析
+- `analyze_operators.py`
+  - 还保留着，用于算子汇总分析
+
+这两个脚本没有并入当前默认入口，因为你这次的核心诉求是先把 SGLang 服务压测流程跑通。
