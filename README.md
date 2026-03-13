@@ -80,6 +80,8 @@ TENSOR_PARALLEL_SIZE=8 \
 ./auto_benchmark.sh
 ```
 
+如果你在容器里跑脚本，`DATASET_PATH` 必须传容器内路径，不要传宿主机路径。例如宿主机文件是 `/home/mccxadmin/workspace/aloysha/ShareGPT.json`，容器里挂载后可能要传 `/workspace/aloysha/ShareGPT.json`。
+
 ## 关键参数
 
 - `MODEL_PATH`
@@ -110,6 +112,14 @@ TENSOR_PARALLEL_SIZE=8 \
   - 对应 `launch_server --attention-backend`
 - `MAX_PREFILL_TOKENS`
   - 可选，对应 `launch_server --max-prefill-tokens`
+- `DATASET_NAME`
+  - `random|random-image|sharegpt`
+- `DATASET_PATH`
+  - 本地数据集路径；离线环境跑 `sharegpt` 时必须显式传
+- `GLOO_SOCKET_IFNAME`
+  - 可选，显式指定 `gloo` 使用的网卡名
+- `TP_SOCKET_IFNAME`
+  - 可选，显式指定 TP 通信使用的网卡名
 - `SGLANG_PORT`
   - 服务端口
 - `SERVER_TIMEOUT`
@@ -129,11 +139,24 @@ MUSA_LAUNCH_BLOCKING=0
 MCCL_IB_GID_INDEX=3
 MCCL_NET_SHARED_BUFFERS=0
 MCCL_PROTOS=2
-GLOO_SOCKET_IFNAME=bond0
-TP_SOCKET_IFNAME=bond0
 SGL_DEEP_GEMM_BLOCK_M=128
 MUSA_VISIBLE_DEVICES=all
 SGLANG_USE_MTT=1
+```
+
+`GLOO_SOCKET_IFNAME` 和 `TP_SOCKET_IFNAME` 不再默认写死 `bond0`。脚本会优先：
+
+- 使用你显式传入的网卡名
+- 如果只传了其中一个，就把另一个补成同一个值
+- 如果两个都没传，就按默认路由自动探测一张可用网卡
+
+如果你的机器有多张网卡，或者容器里自动探测不符合预期，建议手工指定，例如：
+
+```bash
+GLOO_SOCKET_IFNAME=ens19f0np0 \
+TP_SOCKET_IFNAME=ens19f0np0 \
+MODEL_PATH=/workspace/Qwen3-0.6B-FP8 \
+./run_all_tests.sh
 ```
 
 如果你们环境还需要：
@@ -215,7 +238,25 @@ tail -n 100 results/benchmark_*/server.log
 - 传真正包含 `config.json` 的目录
 - 或者传它的上层目录，让脚本自动向下查找
 
-### 3. VL / Dense 数据集不对
+### 3. 报 `Unable to find address for: bond0`
+
+说明当前环境没有 `bond0` 这张网卡，而分布式初始化被硬编码的网卡名卡住了。
+
+当前脚本已经改成优先自动探测默认路由网卡，不再默认写死 `bond0`。如果你还是想显式指定，先看：
+
+```bash
+ip route get 1.1.1.1
+```
+
+输出里 `dev xxx` 的 `xxx` 就是最优先尝试的网卡名，例如：
+
+```bash
+GLOO_SOCKET_IFNAME=ens19f0np0 \
+TP_SOCKET_IFNAME=ens19f0np0 \
+./run_all_tests.sh
+```
+
+### 4. VL / Dense 数据集不对
 
 - VL 模型默认走 `random-image`
 - Dense 模型默认走 `random`
@@ -223,7 +264,53 @@ tail -n 100 results/benchmark_*/server.log
   - `DATASET_NAME=sharegpt`
   - `DATASET_PATH=/data/model/ShareGPT.json`
 
-### 4. 复用已有服务
+### 5. 离线环境跑 `ShareGPT`
+
+如果你的开发环境出不了公网，不要依赖 `bench_serving` 在线下载数据集，直接传本地文件：
+
+```bash
+DATASET_NAME=sharegpt \
+DATASET_PATH=/workspace/aloysha/ShareGPT.json \
+./run_all_tests.sh
+```
+
+注意这里必须传运行环境里的真实路径。如果脚本跑在容器里，就传容器内路径。
+
+### 6. 报 `TypeError: replace() argument 1 must be str, not None`
+
+这不是 `ShareGPT.json` 路径问题，而是开发环境里的 `sglang.bench_serving` 对 tokenizer 的 `bos_token` 做了过强假设。
+
+典型报错链路是：
+
+```text
+sample_sharegpt_requests
+prompt = prompt.replace(tokenizer.bos_token, "")
+TypeError: replace() argument 1 must be str, not None
+```
+
+含义是当前模型对应的 tokenizer 没有字符串类型的 `bos_token`，但 `bench_serving.py` 直接做了 `replace()`。
+
+这个仓库里已经附了一个最小补丁文件 [patches/sglang_bench_serving_bos_token.patch](/home/aloysha/aloysha/test_sglang/patches/sglang_bench_serving_bos_token.patch)。在你们的 `sglang` 开发仓库根目录执行：
+
+```bash
+git apply /path/to/test_sglang/patches/sglang_bench_serving_bos_token.patch
+```
+
+如果你们的 `bench_serving.py` 行号不同、`git apply` 没打上，就手工把这行：
+
+```python
+prompt = prompt.replace(tokenizer.bos_token, "")
+```
+
+改成：
+
+```python
+bos_token = getattr(tokenizer, "bos_token", None)
+if isinstance(bos_token, str) and bos_token:
+    prompt = prompt.replace(bos_token, "")
+```
+
+### 7. 复用已有服务
 
 如果你已经手工起好了服务，不想让脚本重复启动：
 

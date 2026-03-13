@@ -41,6 +41,11 @@ if [ "$DATASET_NAME" = "sharegpt" ] && [ -z "$DATASET_PATH" ]; then
     echo "DATASET_NAME=sharegpt 时必须同时提供 DATASET_PATH" >&2
     exit 1
 fi
+if [ -n "$DATASET_PATH" ] && [ ! -f "$DATASET_PATH" ]; then
+    echo "DATASET_PATH 不存在或不是文件: $DATASET_PATH" >&2
+    echo "如果你在容器里运行脚本，这里必须传容器内路径，而不是宿主机路径。" >&2
+    exit 1
+fi
 
 cmd=(
     "$PYTHON_EXECUTABLE" -u -m sglang.bench_serving
@@ -78,6 +83,9 @@ print_section "SGLang Serving Benchmark"
 echo "模型目录: $RESOLVED_MODEL_PATH"
 echo "模型类型: $DETECTED_MODEL_TYPE"
 echo "数据集: $DATASET_NAME"
+if [ -n "$DATASET_PATH" ]; then
+    echo "数据集路径: $DATASET_PATH"
+fi
 echo "输入长度: $INPUT_LENGTH"
 echo "输出长度: $OUTPUT_LENGTH"
 echo "请求数: $NUM_PROMPTS"

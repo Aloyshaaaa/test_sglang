@@ -49,6 +49,8 @@ print_section "SGLang Server Startup"
 echo "模型目录: $RESOLVED_MODEL_PATH"
 echo "监听地址: ${HOST}:${SGLANG_PORT}"
 echo "TP: $TENSOR_PARALLEL_SIZE"
+echo "GLOO 网卡: ${GLOO_SOCKET_IFNAME:-<未设置>}"
+echo "TP 网卡: ${TP_SOCKET_IFNAME:-<未设置>}"
 echo "命令: ${cmd[*]}"
 echo ""
 

@@ -70,17 +70,67 @@ detect_model_type() {
     esac
 }
 
+network_interface_exists() {
+    local ifname="$1"
+    [ -n "$ifname" ] && [ -d "/sys/class/net/$ifname" ]
+}
+
+detect_default_network_interface() {
+    local ifname=""
+
+    if command -v ip >/dev/null 2>&1; then
+        ifname="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
+        if [ -n "$ifname" ] && network_interface_exists "$ifname"; then
+            echo "$ifname"
+            return 0
+        fi
+
+        ifname="$(ip -o link show up 2>/dev/null | awk -F': ' '$2 != "lo" && $2 != "docker0" {print $2; exit}')"
+        if [ -n "$ifname" ] && network_interface_exists "$ifname"; then
+            echo "$ifname"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 export_default_server_env() {
     export SGLANG_TORCH_PROFILER_DIR="${SGLANG_TORCH_PROFILER_DIR:-/tmp/}"
     export MUSA_LAUNCH_BLOCKING="${MUSA_LAUNCH_BLOCKING:-0}"
     export MCCL_IB_GID_INDEX="${MCCL_IB_GID_INDEX:-3}"
     export MCCL_NET_SHARED_BUFFERS="${MCCL_NET_SHARED_BUFFERS:-0}"
     export MCCL_PROTOS="${MCCL_PROTOS:-2}"
-    export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-bond0}"
-    export TP_SOCKET_IFNAME="${TP_SOCKET_IFNAME:-bond0}"
     export SGL_DEEP_GEMM_BLOCK_M="${SGL_DEEP_GEMM_BLOCK_M:-128}"
     export MUSA_VISIBLE_DEVICES="${MUSA_VISIBLE_DEVICES:-all}"
     export SGLANG_USE_MTT="${SGLANG_USE_MTT:-1}"
+
+    if [ -n "${GLOO_SOCKET_IFNAME:-}" ] && ! network_interface_exists "$GLOO_SOCKET_IFNAME"; then
+        echo "GLOO_SOCKET_IFNAME 指定的网卡不存在: $GLOO_SOCKET_IFNAME" >&2
+        return 1
+    fi
+    if [ -n "${TP_SOCKET_IFNAME:-}" ] && ! network_interface_exists "$TP_SOCKET_IFNAME"; then
+        echo "TP_SOCKET_IFNAME 指定的网卡不存在: $TP_SOCKET_IFNAME" >&2
+        return 1
+    fi
+
+    if [ -z "${GLOO_SOCKET_IFNAME:-}" ] && [ -n "${TP_SOCKET_IFNAME:-}" ]; then
+        export GLOO_SOCKET_IFNAME="$TP_SOCKET_IFNAME"
+    fi
+    if [ -z "${TP_SOCKET_IFNAME:-}" ] && [ -n "${GLOO_SOCKET_IFNAME:-}" ]; then
+        export TP_SOCKET_IFNAME="$GLOO_SOCKET_IFNAME"
+    fi
+
+    if [ -z "${GLOO_SOCKET_IFNAME:-}" ] || [ -z "${TP_SOCKET_IFNAME:-}" ]; then
+        local detected_iface=""
+        detected_iface="$(detect_default_network_interface || true)"
+        if [ -z "${GLOO_SOCKET_IFNAME:-}" ] && [ -n "$detected_iface" ]; then
+            export GLOO_SOCKET_IFNAME="$detected_iface"
+        fi
+        if [ -z "${TP_SOCKET_IFNAME:-}" ] && [ -n "$detected_iface" ]; then
+            export TP_SOCKET_IFNAME="$detected_iface"
+        fi
+    fi
 
     if [ -n "${NVSHMEM_HCA_PE_MAPPING:-}" ]; then
         export NVSHMEM_HCA_PE_MAPPING

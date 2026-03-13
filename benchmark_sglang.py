@@ -27,12 +27,11 @@ DEFAULT_SERVER_ENV = {
     "MCCL_IB_GID_INDEX": "3",
     "MCCL_NET_SHARED_BUFFERS": "0",
     "MCCL_PROTOS": "2",
-    "GLOO_SOCKET_IFNAME": "bond0",
-    "TP_SOCKET_IFNAME": "bond0",
     "SGL_DEEP_GEMM_BLOCK_M": "128",
     "MUSA_VISIBLE_DEVICES": "all",
     "SGLANG_USE_MTT": "1",
 }
+OPTIONAL_SERVER_ENV_KEYS = ("GLOO_SOCKET_IFNAME", "TP_SOCKET_IFNAME")
 
 
 def resolve_model_path(model_path: str) -> str:
@@ -91,6 +90,54 @@ def parse_key_value_pairs(items: list[str]) -> dict[str, str]:
 
 def quote_command(cmd: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
+
+
+def network_interface_exists(ifname: str) -> bool:
+    return bool(ifname) and Path("/sys/class/net", ifname).exists()
+
+
+def detect_default_network_interface() -> str | None:
+    try:
+        completed = subprocess.run(
+            ["ip", "route", "get", "1.1.1.1"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        completed = None
+
+    if completed and completed.returncode == 0:
+        fields = completed.stdout.split()
+        for index, field in enumerate(fields[:-1]):
+            if field == "dev":
+                candidate = fields[index + 1]
+                if network_interface_exists(candidate):
+                    return candidate
+
+    try:
+        completed = subprocess.run(
+            ["ip", "-o", "link", "show", "up"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    for line in completed.stdout.splitlines():
+        parts = line.split(": ", 2)
+        if len(parts) < 2:
+            continue
+        candidate = parts[1]
+        if candidate in {"lo", "docker0"}:
+            continue
+        if network_interface_exists(candidate):
+            return candidate
+    return None
 
 
 def build_server_command(args, model_path: str) -> list[str]:
@@ -172,6 +219,28 @@ def build_server_env(args) -> dict[str, str]:
     env = os.environ.copy()
     env.update(DEFAULT_SERVER_ENV)
     env.update(parse_key_value_pairs(args.server_env))
+
+    gloo_ifname = env.get("GLOO_SOCKET_IFNAME", "")
+    tp_ifname = env.get("TP_SOCKET_IFNAME", "")
+
+    if gloo_ifname and not network_interface_exists(gloo_ifname):
+        raise ValueError(f"GLOO_SOCKET_IFNAME 指定的网卡不存在: {gloo_ifname}")
+    if tp_ifname and not network_interface_exists(tp_ifname):
+        raise ValueError(f"TP_SOCKET_IFNAME 指定的网卡不存在: {tp_ifname}")
+
+    if not gloo_ifname and tp_ifname:
+        env["GLOO_SOCKET_IFNAME"] = tp_ifname
+        gloo_ifname = tp_ifname
+    if not tp_ifname and gloo_ifname:
+        env["TP_SOCKET_IFNAME"] = gloo_ifname
+        tp_ifname = gloo_ifname
+
+    if not gloo_ifname or not tp_ifname:
+        detected_ifname = detect_default_network_interface()
+        if detected_ifname:
+            env.setdefault("GLOO_SOCKET_IFNAME", detected_ifname)
+            env.setdefault("TP_SOCKET_IFNAME", detected_ifname)
+
     return env
 
 
@@ -312,7 +381,11 @@ def benchmark_sglang(args, model_path: str) -> dict:
                 "disable_radix_cache": args.disable_radix_cache,
                 "disable_overlap_schedule": args.disable_overlap_schedule,
                 "trust_remote_code": args.trust_remote_code,
-                "env": {key: server_env[key] for key in DEFAULT_SERVER_ENV},
+                "env": {
+                    key: server_env[key]
+                    for key in (*DEFAULT_SERVER_ENV, *OPTIONAL_SERVER_ENV_KEYS)
+                    if key in server_env
+                },
                 "log_file": str(server_log_path),
                 "launch_command": quote_command(server_command),
             },
