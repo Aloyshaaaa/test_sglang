@@ -1,467 +1,397 @@
 #!/usr/bin/env python3
 """
-SGLang Benchmark Script for Qwen3-0.6B
-输入长度: 3000, 输出长度: 500
+SGLang benchmark script for MUSA environments.
+
+Reference workflow:
+1. Launch `python -m sglang.launch_server`
+2. Wait for `/health`
+3. Run `python -m sglang.bench_serving`
+4. Parse the generated JSON report
 """
 
 import argparse
-import inspect
 import json
+import os
+import shlex
+import subprocess
+import sys
 import time
-import torch
-import statistics
-
-# 摩尔线程 MUSA 环境检测和适配
-MUSA_AVAILABLE = False
-try:
-    import torch_musa
-    if torch.musa.is_available():
-        MUSA_AVAILABLE = True
-        print("检测到摩尔线程 MUSA 环境")
-        device = torch.device("musa")
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-except ImportError:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if torch.cuda.is_available():
-        print("检测到 CUDA 环境")
-    else:
-        print("使用 CPU 环境")
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
 
-def get_device_type(explicit_device: str = "auto") -> str:
-    """返回当前推理设备类型。"""
-    if explicit_device != "auto":
-        return explicit_device
-    if MUSA_AVAILABLE:
-        return "musa"
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+DEFAULT_SERVER_ENV = {
+    "SGLANG_TORCH_PROFILER_DIR": "/tmp/",
+    "MUSA_LAUNCH_BLOCKING": "0",
+    "MCCL_IB_GID_INDEX": "3",
+    "MCCL_NET_SHARED_BUFFERS": "0",
+    "MCCL_PROTOS": "2",
+    "GLOO_SOCKET_IFNAME": "bond0",
+    "TP_SOCKET_IFNAME": "bond0",
+    "SGL_DEEP_GEMM_BLOCK_M": "128",
+    "MUSA_VISIBLE_DEVICES": "all",
+    "SGLANG_USE_MTT": "1",
+}
 
-def synchronize_device():
-    """同步设备（支持 MUSA 和 CUDA）"""
-    if MUSA_AVAILABLE:
-        torch.musa.synchronize()
-    elif torch.cuda.is_available():
-        torch.cuda.synchronize()
 
-# 尝试导入 SGLang
-# 如果未安装，可以使用 pip install sglang
-try:
-    import sglang as sgl
-    SGLANG_AVAILABLE = True
-except ImportError:
-    SGLANG_AVAILABLE = False
-    print("警告: SGLang 未安装，将使用 PyTorch 原生推理作为替代")
-    print("安装命令: pip install sglang")
+def resolve_model_path(model_path: str) -> str:
+    """Resolve the model path to a directory that contains config.json."""
+    path = Path(model_path).expanduser()
+    if not path.exists():
+        return model_path
 
-SGLANG_FRONTEND_AVAILABLE = False
-if SGLANG_AVAILABLE:
+    if path.is_file():
+        return str(path.parent) if path.name == "config.json" else model_path
+
+    if (path / "config.json").exists():
+        return str(path)
+
+    candidate_dirs = []
+    seen = set()
+    for config_file in sorted(path.rglob("config.json")):
+        parent_dir = str(config_file.parent)
+        if parent_dir in seen:
+            continue
+        seen.add(parent_dir)
+        candidate_dirs.append(parent_dir)
+        if len(candidate_dirs) >= 8:
+            break
+
+    if len(candidate_dirs) == 1:
+        print(f"检测到嵌套模型目录，自动切换到: {candidate_dirs[0]}")
+        return candidate_dirs[0]
+
+    if len(candidate_dirs) > 1:
+        print("警告: 模型路径下存在多个 config.json，无法自动选择:")
+        for candidate_dir in candidate_dirs[:5]:
+            print(f"  - {candidate_dir}")
+        return model_path
+
+    print(f"警告: 模型路径下未找到 config.json: {model_path}")
+    return model_path
+
+
+def parse_key_value_pairs(items: list[str]) -> dict[str, str]:
+    parsed = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"无效的 KEY=VALUE 参数: {item}")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"无效的环境变量名: {item}")
+        parsed[key] = value
+    return parsed
+
+
+def quote_command(cmd: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in cmd)
+
+
+def build_server_command(args, model_path: str) -> list[str]:
+    cmd = [
+        args.python_executable,
+        "-m",
+        "sglang.launch_server",
+        "--model",
+        model_path,
+        "--port",
+        str(args.port),
+        "--host",
+        args.host,
+        "--tensor-parallel-size",
+        str(args.tensor_parallel_size),
+        "--mem-fraction-static",
+        str(args.mem_fraction_static),
+        "--cuda-graph-max-bs",
+        str(args.cuda_graph_max_bs),
+        "--attention-backend",
+        args.attention_backend,
+    ]
+
+    if args.trust_remote_code:
+        cmd.append("--trust-remote-code")
+    if args.disable_radix_cache:
+        cmd.append("--disable-radix-cache")
+    if args.disable_overlap_schedule:
+        cmd.append("--disable-overlap-schedule")
+    if args.max_prefill_tokens is not None:
+        cmd.extend(["--max-prefill-tokens", str(args.max_prefill_tokens)])
+    return cmd
+
+
+def build_bench_command(args, model_path: str, raw_output_file: str) -> list[str]:
+    cmd = [
+        args.python_executable,
+        "-u",
+        "-m",
+        "sglang.bench_serving",
+        "--backend",
+        "sglang",
+        "--port",
+        str(args.port),
+        "--model",
+        model_path,
+        "--num-prompts",
+        str(args.num_prompts),
+        "--random-input-len",
+        str(args.input_length),
+        "--random-output-len",
+        str(args.output_length),
+        "--dataset-name",
+        args.dataset_name,
+        "--warmup-requests",
+        str(args.warmup_requests),
+        "--random-range-ratio",
+        str(args.random_range_ratio),
+        "--max-concurrency",
+        str(args.max_concurrency),
+        "--output-file",
+        raw_output_file,
+    ]
+
+    if args.apply_chat_template:
+        cmd.append("--apply-chat-template")
+    if args.dataset_path:
+        cmd.extend(["--dataset-path", args.dataset_path])
+    if args.request_rate is not None:
+        cmd.extend(["--request-rate", str(args.request_rate)])
+    if args.random_image_num_images is not None:
+        cmd.extend(["--random-image-num-images", str(args.random_image_num_images)])
+    if args.random_image_resolution:
+        cmd.extend(["--random-image-resolution", args.random_image_resolution])
+    return cmd
+
+
+def build_server_env(args) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(DEFAULT_SERVER_ENV)
+    env.update(parse_key_value_pairs(args.server_env))
+    return env
+
+
+def wait_for_health(health_host: str, port: int, timeout_seconds: int) -> bool:
+    deadline = time.time() + timeout_seconds
+    health_url = f"http://{health_host}:{port}/health"
+    while time.time() < deadline:
+        try:
+            with urlopen(health_url, timeout=5) as response:
+                if response.status == 200:
+                    return True
+        except (HTTPError, URLError, TimeoutError, OSError):
+            time.sleep(5)
+    return False
+
+
+def terminate_process(process: subprocess.Popen | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
     try:
-        from sglang import function, system, user, assistant, gen, set_default_backend
-        SGLANG_FRONTEND_AVAILABLE = True
-    except ImportError:
-        # 新版本可能只保留 Engine 离线接口，不强依赖前端 DSL。
-        SGLANG_FRONTEND_AVAILABLE = False
+        process.wait(timeout=20)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    process.kill()
+    process.wait(timeout=10)
 
 
-class SGLangBenchmark:
-    """SGLang 推理性能测试类"""
-    
-    def __init__(
-        self,
-        model_path: str,
-        input_length: int = 3000,
-        output_length: int = 500,
-        device_type: str = "auto",
-    ):
-        self.model_path = model_path
-        self.input_length = input_length
-        self.output_length = output_length
-        self.device_type = get_device_type(device_type)
-        self.results = []
-        
-    def generate_prompt(self, length: int) -> str:
-        """生成指定长度的测试 prompt"""
-        # 使用重复文本来模拟长输入
-        base_text = """人工智能（Artificial Intelligence，简称AI）是计算机科学的一个分支，致力于创造能够模拟人类智能的系统。
-        这些系统可以学习、推理、感知环境并做出决策。机器学习是AI的一个重要子领域，它使计算机能够从数据中学习而无需明确编程。
-        深度学习是机器学习的一种方法，使用多层神经网络来模拟人脑的工作方式。"""
-        
-        # 计算需要重复的次数
-        repeat_times = (length // len(base_text)) + 1
-        prompt = (base_text * repeat_times)[:length]
-        return prompt
+def load_json_file(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as file_obj:
+        return json.load(file_obj)
 
-    def _callable_supports_kwarg(self, callable_obj, arg_name: str) -> bool:
-        """检查可调用对象是否显式声明了某个参数。"""
-        try:
-            signature = inspect.signature(callable_obj)
-        except (TypeError, ValueError):
-            return False
-        return arg_name in signature.parameters
 
-    def _create_sglang_backend(self):
-        """兼容不同版本 SGLang 的后端初始化方式。"""
-        constructor_candidates = []
-        runtime_ctor = getattr(sgl, "Runtime", None)
-        engine_ctor = getattr(sgl, "Engine", None)
-        if runtime_ctor is not None:
-            constructor_candidates.append(("Runtime", runtime_ctor))
-        if engine_ctor is not None:
-            constructor_candidates.append(("Engine", engine_ctor))
+def save_results(path: str, results: dict) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as file_obj:
+        json.dump(results, file_obj, indent=2, ensure_ascii=False)
+    print(f"结果已保存到: {output_path}")
 
-        if not constructor_candidates:
-            raise RuntimeError("当前 SGLang 版本未找到 Runtime 或 Engine 入口")
 
-        request_keys = ["max_running_requests", "max_num_reqs", None]
-        tp_keys = ["tp_size", "tensor_parallel_size"]
-        model_keys = ["model_path", "model"]
-        device_values = [self.device_type]
-        if self.device_type != "cpu":
-            device_values.append(None)
+def benchmark_sglang(args, model_path: str) -> dict:
+    print("\n" + "=" * 60)
+    print("SGLang Serving Benchmark")
+    print(f"模型路径: {model_path}")
+    print(f"输入长度: {args.input_length}, 输出长度: {args.output_length}")
+    print(f"请求数: {args.num_prompts}, 最大并发: {args.max_concurrency}")
+    print("=" * 60 + "\n")
 
-        errors = []
-        for constructor_name, constructor in constructor_candidates:
-            for model_key in model_keys:
-                for tp_key in tp_keys:
-                    base_kwargs = {model_key: self.model_path, tp_key: 1}
-                    for request_key in request_keys:
-                        kwargs = dict(base_kwargs)
-                        if request_key is not None:
-                            kwargs[request_key] = 1
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-                        for device_value in device_values:
-                            attempt_kwargs = dict(kwargs)
-                            if device_value is not None:
-                                attempt_kwargs["device"] = device_value
+    server_log_path = Path(args.server_log) if args.server_log else output_path.with_suffix(".server.log")
+    raw_result_path = output_path.with_suffix(".sglang.raw.json")
+    raw_result_path.parent.mkdir(parents=True, exist_ok=True)
 
-                            try:
-                                backend = constructor(**attempt_kwargs)
-                                print(
-                                    f"SGLang 后端已初始化: {constructor_name}"
-                                    f" ({attempt_kwargs})"
-                                )
-                                return backend
-                            except TypeError as exc:
-                                errors.append(
-                                    f"{constructor_name}{attempt_kwargs}: {exc}"
-                                )
-                                continue
-                            except Exception as exc:
-                                raise RuntimeError(
-                                    f"{constructor_name} 初始化失败: {exc}"
-                                ) from exc
+    server_env = build_server_env(args)
+    server_command = build_server_command(args, model_path)
+    bench_command = build_bench_command(args, model_path, str(raw_result_path))
 
-        raise RuntimeError(" ; ".join(errors[-6:]))
+    server_process = None
+    server_log_handle = None
+    server_started_by_script = False
 
-    def _extract_sglang_text(self, output) -> str:
-        """从不同版本 SGLang 返回值中提取文本。"""
-        if isinstance(output, dict):
-            for key in ("answer", "text", "generated_text", "output_text"):
-                value = output.get(key)
-                if isinstance(value, str):
-                    return value
-            return str(output)
-
-        if isinstance(output, list) and output:
-            return self._extract_sglang_text(output[0])
-
-        if hasattr(output, "text") and isinstance(output.text, str):
-            return output.text
-
-        return str(output)
-
-    def _build_sglang_runner(self, backend):
-        """优先使用前端 DSL，失败时回退到 Engine.generate。"""
-        if SGLANG_FRONTEND_AVAILABLE:
-            try:
-                set_default_backend(backend)
-
-                @function
-                def qa(s, question):
-                    s += system("你是一个有用的AI助手。")
-                    s += user(question)
-                    s += assistant(gen("answer", max_tokens=self.output_length))
-
-                def run_once(question: str) -> str:
-                    state = qa.run(question=question)
-                    return self._extract_sglang_text(state)
-
-                return run_once
-            except Exception as exc:
-                print(f"SGLang 前端 DSL 不可用，回退到 Engine.generate: {exc}")
-
-        if not hasattr(backend, "generate"):
-            raise RuntimeError("当前 SGLang 后端既不支持前端 DSL，也不支持 generate 接口")
-
-        def run_once(question: str) -> str:
-            sampling_variants = [
-                {"temperature": 0.7, "max_new_tokens": self.output_length},
-                {"temperature": 0.7, "max_tokens": self.output_length},
-            ]
-            last_error = None
-            for sampling_params in sampling_variants:
-                try:
-                    outputs = backend.generate([question], sampling_params)
-                    return self._extract_sglang_text(outputs)
-                except TypeError as exc:
-                    last_error = exc
-                    continue
-                except Exception as exc:
-                    error_text = str(exc)
-                    if "max_new_tokens" in error_text or "max_tokens" in error_text:
-                        last_error = exc
-                        continue
-                    raise
-            raise RuntimeError(f"SGLang generate 调用失败: {last_error}")
-
-        return run_once
-    
-    def benchmark_sglang(self, num_runs: int = 10, warmup: int = 2) -> dict:
-        """使用 SGLang 进行推理测试"""
-        if not SGLANG_AVAILABLE:
-            print("SGLang 不可用，跳过 SGLang 测试")
-            return {}
-        
-        print(f"\n{'='*60}")
-        print(f"SGLang Benchmark - Qwen3-0.6B")
-        print(f"输入长度: {self.input_length}, 输出长度: {self.output_length}")
-        print(f"{'='*60}\n")
-        
-        # 初始化 SGLang 后端
-        print("正在初始化 SGLang 后端...")
-        try:
-            backend = self._create_sglang_backend()
-            run_once = self._build_sglang_runner(backend)
-        except Exception as e:
-            print(f"SGLang 初始化失败: {e}")
-            return {}
-        
-        # 生成测试 prompt
-        prompt = self.generate_prompt(self.input_length)
-        print(f"Prompt 长度: {len(prompt)} 字符")
-        
-        # Warmup
-        print(f"\nWarmup 运行 {warmup} 次...")
-        for _ in range(warmup):
-            try:
-                _ = run_once(prompt)
-            except Exception as e:
-                print(f"Warmup 失败: {e}")
-                return {}
-        
-        # 正式测试
-        print(f"开始正式测试 {num_runs} 次...\n")
-        latencies = []
-        tokens_per_sec = []
-        
-        for i in range(num_runs):
-            synchronize_device()
-            start_time = time.perf_counter()
-            
-            try:
-                answer = run_once(prompt)
-                
-                synchronize_device()
-                end_time = time.perf_counter()
-                
-                latency = end_time - start_time
-                latencies.append(latency)
-                
-                # 估算生成的 token 数
-                output_tokens = len(answer) // 4  # 粗略估算
-                tps = output_tokens / latency if latency > 0 else 0
-                tokens_per_sec.append(tps)
-                
-                print(f"Run {i+1}/{num_runs}: {latency:.3f}s, {tps:.2f} tokens/s")
-                
-            except Exception as e:
-                print(f"Run {i+1} 失败: {e}")
-                continue
-        
-        # 计算统计指标
-        if latencies:
-            results = {
-                "backend": "sglang",
-                "model": self.model_path,
-                "input_length": self.input_length,
-                "output_length": self.output_length,
-                "num_runs": len(latencies),
-                "avg_latency": statistics.mean(latencies),
-                "min_latency": min(latencies),
-                "max_latency": max(latencies),
-                "p50_latency": statistics.median(latencies),
-                "p99_latency": sorted(latencies)[int(len(latencies)*0.99)] if len(latencies) >= 100 else max(latencies),
-                "avg_tokens_per_sec": statistics.mean(tokens_per_sec),
-                "latencies": latencies,
-            }
-            
-            print(f"\n{'='*60}")
-            print("SGLang 测试结果:")
-            print(f"{'='*60}")
-            print(f"平均延迟: {results['avg_latency']:.3f}s")
-            print(f"最小延迟: {results['min_latency']:.3f}s")
-            print(f"最大延迟: {results['max_latency']:.3f}s")
-            print(f"P50 延迟: {results['p50_latency']:.3f}s")
-            print(f"P99 延迟: {results['p99_latency']:.3f}s")
-            print(f"平均吞吐: {results['avg_tokens_per_sec']:.2f} tokens/s")
-            print(f"{'='*60}\n")
-            
-            return results
-        
-        return {}
-    
-    def benchmark_vllm(self, num_runs: int = 10, warmup: int = 2) -> dict:
-        """使用 vLLM 进行推理测试（作为对比）"""
-        print(f"\n{'='*60}")
-        print(f"vLLM Benchmark - Qwen3-0.6B")
-        print(f"输入长度: {self.input_length}, 输出长度: {self.output_length}")
-        print(f"{'='*60}\n")
-        
-        try:
-            from vllm import LLM, SamplingParams
-        except ImportError:
-            print("vLLM 未安装，跳过 vLLM 测试")
-            return {}
-        
-        print("正在加载 vLLM 模型...")
-        try:
-            llm_kwargs = dict(
-                model=self.model_path,
-                tensor_parallel_size=1,
-                max_model_len=4096,
-                device=self.device_type,
+    try:
+        if not args.use_existing_server:
+            server_log_handle = open(server_log_path, "a", encoding="utf-8")
+            print("正在启动 SGLang Server...")
+            print(f"Server 命令: {quote_command(server_command)}")
+            print(f"Server 日志: {server_log_path}")
+            server_process = subprocess.Popen(
+                server_command,
+                stdout=server_log_handle,
+                stderr=subprocess.STDOUT,
+                env=server_env,
+                start_new_session=True,
+                text=True,
             )
-            print(f"vLLM 设备类型: {self.device_type}")
-            llm = LLM(**llm_kwargs)
-        except Exception as e:
-            print(f"vLLM 加载失败: {e}")
-            return {}
-        
-        sampling_params = SamplingParams(
-            temperature=0.7,
-            max_tokens=self.output_length,
-        )
-        
-        # 生成测试 prompt
-        prompt = self.generate_prompt(self.input_length)
-        prompts = [prompt]
-        
-        # Warmup
-        print(f"\nWarmup 运行 {warmup} 次...")
-        for _ in range(warmup):
-            outputs = llm.generate(prompts, sampling_params)
-        
-        # 正式测试
-        print(f"开始正式测试 {num_runs} 次...\n")
-        latencies = []
-        
-        for i in range(num_runs):
-            synchronize_device()
-            start_time = time.perf_counter()
-            
-            outputs = llm.generate(prompts, sampling_params)
-            
-            synchronize_device()
-            end_time = time.perf_counter()
-            
-            latency = end_time - start_time
-            latencies.append(latency)
-            
-            output_tokens = len(outputs[0].outputs[0].token_ids)
-            tps = output_tokens / latency if latency > 0 else 0
-            
-            print(f"Run {i+1}/{num_runs}: {latency:.3f}s, {tps:.2f} tokens/s")
-        
-        if latencies:
-            results = {
-                "backend": "vllm",
-                "model": self.model_path,
-                "input_length": self.input_length,
-                "output_length": self.output_length,
-                "num_runs": len(latencies),
-                "avg_latency": statistics.mean(latencies),
-                "min_latency": min(latencies),
-                "max_latency": max(latencies),
-                "p50_latency": statistics.median(latencies),
-                "p99_latency": sorted(latencies)[int(len(latencies)*0.99)] if len(latencies) >= 100 else max(latencies),
-                "latencies": latencies,
-            }
-            
-            print(f"\n{'='*60}")
-            print("vLLM 测试结果:")
-            print(f"{'='*60}")
-            print(f"平均延迟: {results['avg_latency']:.3f}s")
-            print(f"最小延迟: {results['min_latency']:.3f}s")
-            print(f"最大延迟: {results['max_latency']:.3f}s")
-            print(f"P50 延迟: {results['p50_latency']:.3f}s")
-            print(f"P99 延迟: {results['p99_latency']:.3f}s")
-            print(f"{'='*60}\n")
-            
-            return results
-        
-        return {}
-    
-    def save_results(self, results: dict, filename: str = "benchmark_results.json"):
-        """保存测试结果到文件"""
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        print(f"结果已保存到: {filename}")
+            server_started_by_script = True
+        else:
+            print(f"使用现有 SGLang Server: {args.health_host}:{args.port}")
+
+        print("等待 /health 就绪...")
+        if not wait_for_health(args.health_host, args.port, args.server_timeout):
+            raise RuntimeError(
+                f"SGLang 服务在 {args.server_timeout}s 内未就绪，请检查日志: {server_log_path}"
+            )
+
+        print("SGLang 服务已就绪，开始压测...")
+        print(f"Benchmark 命令: {quote_command(bench_command)}")
+        completed = subprocess.run(bench_command, env=os.environ.copy(), check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(f"sglang.bench_serving 退出码非 0: {completed.returncode}")
+
+        if not raw_result_path.exists():
+            raise RuntimeError(f"未生成 bench_serving 结果文件: {raw_result_path}")
+
+        benchmark_result = load_json_file(str(raw_result_path))
+        result = {
+            "backend": "sglang",
+            "requested_model_path": args.model_path,
+            "model": model_path,
+            "dataset_name": args.dataset_name,
+            "server_started_by_script": server_started_by_script,
+            "server": {
+                "host": args.host,
+                "health_host": args.health_host,
+                "port": args.port,
+                "tensor_parallel_size": args.tensor_parallel_size,
+                "mem_fraction_static": args.mem_fraction_static,
+                "cuda_graph_max_bs": args.cuda_graph_max_bs,
+                "attention_backend": args.attention_backend,
+                "max_prefill_tokens": args.max_prefill_tokens,
+                "disable_radix_cache": args.disable_radix_cache,
+                "disable_overlap_schedule": args.disable_overlap_schedule,
+                "trust_remote_code": args.trust_remote_code,
+                "env": {key: server_env[key] for key in DEFAULT_SERVER_ENV},
+                "log_file": str(server_log_path),
+                "launch_command": quote_command(server_command),
+            },
+            "benchmark_config": {
+                "num_prompts": args.num_prompts,
+                "input_length": args.input_length,
+                "output_length": args.output_length,
+                "warmup_requests": args.warmup_requests,
+                "max_concurrency": args.max_concurrency,
+                "random_range_ratio": args.random_range_ratio,
+                "apply_chat_template": args.apply_chat_template,
+                "dataset_path": args.dataset_path,
+                "request_rate": args.request_rate,
+                "random_image_num_images": args.random_image_num_images,
+                "random_image_resolution": args.random_image_resolution,
+                "bench_command": quote_command(bench_command),
+                "raw_result_file": str(raw_result_path),
+            },
+            "metrics": benchmark_result,
+        }
+        return result
+    finally:
+        if server_log_handle is not None:
+            server_log_handle.flush()
+            server_log_handle.close()
+        if server_started_by_script and not args.keep_server:
+            terminate_process(server_process)
 
 
-def main():
-    parser = argparse.ArgumentParser(description='SGLang Benchmark for Qwen3-0.6B')
-    parser.add_argument('--model-path', type=str, default='/workspace/models/Qwen3-0.6B',
-                        help='模型路径')
-    parser.add_argument('--input-length', type=int, default=3000,
-                        help='输入长度')
-    parser.add_argument('--output-length', type=int, default=500,
-                        help='输出长度')
-    parser.add_argument('--num-runs', type=int, default=10,
-                        help='测试运行次数')
-    parser.add_argument('--warmup', type=int, default=2,
-                        help='Warmup 次数')
-    parser.add_argument('--backend', type=str, default='sglang',
-                        choices=['sglang', 'vllm', 'both'],
-                        help='测试后端')
-    parser.add_argument('--device', type=str, default='auto',
-                        choices=['auto', 'musa', 'cuda', 'cpu'],
-                        help='推理设备类型')
-    parser.add_argument('--output', type=str, default='benchmark_results.json',
-                        help='输出结果文件')
-    
-    args = parser.parse_args()
-    
-    benchmark = SGLangBenchmark(
-        model_path=args.model_path,
-        input_length=args.input_length,
-        output_length=args.output_length,
-        device_type=args.device,
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="SGLang MUSA Serving Benchmark")
+    parser.add_argument("--model-path", type=str, default="/workspace/models/Qwen3-0.6B", help="模型路径")
+    parser.add_argument("--input-length", type=int, default=3000, help="随机输入长度")
+    parser.add_argument("--output-length", type=int, default=500, help="随机输出长度")
+    parser.add_argument("--num-runs", dest="num_prompts", type=int, default=10, help="兼容旧参数名，等价于 --num-prompts")
+    parser.add_argument("--num-prompts", dest="num_prompts", type=int, help="压测请求数")
+    parser.add_argument("--warmup", dest="warmup_requests", type=int, default=2, help="兼容旧参数名，等价于 --warmup-requests")
+    parser.add_argument("--warmup-requests", dest="warmup_requests", type=int, help="bench_serving warmup 请求数")
+    parser.add_argument("--backend", type=str, default="sglang", choices=["sglang", "vllm", "both"], help="保留旧接口；当前文档流仅实现 sglang")
+    parser.add_argument("--output", type=str, default="benchmark_results.json", help="输出结果文件")
+
+    parser.add_argument("--python-executable", type=str, default=sys.executable, help="用于启动 server 和 bench 的 Python")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="SGLang server host")
+    parser.add_argument("--health-host", type=str, default="127.0.0.1", help="health check 使用的 host")
+    parser.add_argument("--port", type=int, default=30001, help="SGLang server 端口")
+    parser.add_argument("--server-timeout", type=int, default=600, help="等待 server ready 的超时时间（秒）")
+    parser.add_argument("--server-log", type=str, default=None, help="服务日志文件路径")
+    parser.add_argument("--use-existing-server", action="store_true", help="不启动新服务，直接压测现有服务")
+    parser.add_argument("--keep-server", action="store_true", help="脚本退出后保留当前脚本启动的服务")
+
+    parser.add_argument("--tensor-parallel-size", type=int, default=1, help="tensor parallel size")
+    parser.add_argument("--mem-fraction-static", type=float, default=0.9, help="launch_server --mem-fraction-static")
+    parser.add_argument("--cuda-graph-max-bs", type=int, default=256, help="launch_server --cuda-graph-max-bs")
+    parser.add_argument("--attention-backend", type=str, default="fa3", help="launch_server --attention-backend")
+    parser.add_argument("--max-prefill-tokens", type=int, default=None, help="可选的 launch_server --max-prefill-tokens")
+    parser.add_argument("--server-env", action="append", default=[], metavar="KEY=VALUE", help="附加或覆盖 server 环境变量")
+
+    parser.add_argument("--dataset-name", type=str, default="random", choices=["random", "random-image", "sharegpt"], help="bench_serving 数据集类型")
+    parser.add_argument("--dataset-path", type=str, default=None, help="sharegpt 等数据集路径")
+    parser.add_argument("--max-concurrency", type=int, default=64, help="bench_serving 最大并发")
+    parser.add_argument("--random-range-ratio", type=float, default=1.0, help="bench_serving --random-range-ratio")
+    parser.add_argument("--request-rate", type=float, default=None, help="可选的 bench_serving --request-rate")
+    parser.add_argument("--random-image-num-images", type=int, default=None, help="VL 模型随机图片数")
+    parser.add_argument("--random-image-resolution", type=str, default=None, help="VL 模型随机图片分辨率，例如 1148x112")
+
+    parser.set_defaults(
+        trust_remote_code=True,
+        disable_radix_cache=True,
+        disable_overlap_schedule=True,
+        apply_chat_template=True,
     )
-    
+    parser.add_argument("--trust-remote-code", dest="trust_remote_code", action="store_true", help="启用 trust remote code")
+    parser.add_argument("--no-trust-remote-code", dest="trust_remote_code", action="store_false", help="关闭 trust remote code")
+    parser.add_argument("--disable-radix-cache", dest="disable_radix_cache", action="store_true", help="禁用 radix cache")
+    parser.add_argument("--enable-radix-cache", dest="disable_radix_cache", action="store_false", help="启用 radix cache")
+    parser.add_argument("--disable-overlap-schedule", dest="disable_overlap_schedule", action="store_true", help="禁用 overlap schedule")
+    parser.add_argument("--enable-overlap-schedule", dest="disable_overlap_schedule", action="store_false", help="启用 overlap schedule")
+    parser.add_argument("--apply-chat-template", dest="apply_chat_template", action="store_true", help="bench_serving 时应用 chat template")
+    parser.add_argument("--no-apply-chat-template", dest="apply_chat_template", action="store_false", help="bench_serving 时不应用 chat template")
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    model_path = resolve_model_path(args.model_path)
     all_results = {}
-    
-    if args.backend in ['sglang', 'both']:
-        sgl_results = benchmark.benchmark_sglang(
-            num_runs=args.num_runs,
-            warmup=args.warmup
-        )
-        if sgl_results:
-            all_results['sglang'] = sgl_results
-    
-    if args.backend in ['vllm', 'both']:
-        vllm_results = benchmark.benchmark_vllm(
-            num_runs=args.num_runs,
-            warmup=args.warmup
-        )
-        if vllm_results:
-            all_results['vllm'] = vllm_results
-    
-    if all_results:
-        benchmark.save_results(all_results, args.output)
+
+    if args.backend in {"sglang", "both"}:
+        all_results["sglang"] = benchmark_sglang(args, model_path)
+
+    if args.backend in {"vllm", "both"}:
+        all_results["vllm"] = {
+            "backend": "vllm",
+            "skipped": True,
+            "reason": "当前脚本已按 SGLang MUSA 文档改为 launch_server + bench_serving 流程，未实现 vLLM 服务流。",
+        }
+        if args.backend == "vllm":
+            print("vLLM 基准测试未实现；当前脚本仅对齐 SGLang MUSA 文档流。")
+
+    if not all_results:
+        raise SystemExit("没有可执行的 benchmark backend。")
+
+    save_results(args.output, all_results)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -54,26 +54,42 @@ python benchmark_sglang.py \
     --output-length 500 \
     --num-runs 10 \
     --warmup 2 \
-    --device auto \
-    --backend both \
+    --backend sglang \
+    --dataset-name random \
+    --max-concurrency 64 \
+    --port 30001 \
+    --tensor-parallel-size 1 \
     --output benchmark_results.json
 ```
 
 参数说明：
 - `--model-path`: 模型路径
-- `--input-length`: 输入长度 (默认: 3000)
-- `--output-length`: 输出长度 (默认: 500)
-- `--num-runs`: 测试运行次数 (默认: 10)
-- `--warmup`: Warmup 次数 (默认: 2)
-- `--device`: 推理设备类型 (auto/musa/cuda/cpu，默认: auto)
-- `--backend`: 测试后端 (sglang/vllm/both)
+- `--input-length`: `bench_serving --random-input-len`
+- `--output-length`: `bench_serving --random-output-len`
+- `--num-runs`: 兼容旧参数名，等价于 `--num-prompts`
+- `--warmup`: 兼容旧参数名，等价于 `--warmup-requests`
+- `--dataset-name`: 数据集类型，Dense 模型用 `random`，VL 模型用 `random-image`
+- `--max-concurrency`: 压测最大并发
+- `--port`: SGLang Server 监听端口
+- `--tensor-parallel-size`: `launch_server` 的 TP 配置
+- `--backend`: 保留旧接口；当前脚本仅实现文档口径的 `sglang`
 - `--output`: 输出结果文件
 
-设备说明：
-- `--device auto`: 自动按 `torch_musa -> CUDA -> CPU` 顺序选择设备
-- `--device musa`: 在摩尔线程环境中显式指定 MUSA，适合 vLLM / vllm_musa 自动探测异常时使用
-- `--device cuda`: 在 NVIDIA CUDA 环境中显式指定 CUDA
-- `--device cpu`: 仅用于无加速卡环境下的兼容性测试
+执行流程：
+- 脚本会先启动 `python -m sglang.launch_server`
+- 然后轮询 `http://127.0.0.1:<port>/health`
+- 健康检查通过后，执行 `python -m sglang.bench_serving`
+- 最终将 `bench_serving` 原始 JSON 和封装后的结果写入输出文件附近
+
+模型路径说明：
+- `--model-path` 最终需要指向一个包含 `config.json` 的 Hugging Face 模型目录
+- 如果传入的是上层目录，脚本会尝试自动向下查找唯一的 `config.json` 所在目录
+- 如果目录下存在多个 `config.json`，脚本会打印候选目录并要求手动指定更精确的路径
+
+数据集说明：
+- Dense 模型建议使用 `--dataset-name random`
+- VL 模型建议使用 `--dataset-name random-image --random-image-num-images 1 --random-image-resolution 1148x112`
+- 如果要跑真实对话数据，可使用 `--dataset-name sharegpt --dataset-path /data/model/ShareGPT.json`
 
 ### 2. 性能分析
 
@@ -111,10 +127,12 @@ cat benchmark_results.json | python -m json.tool
 ```
 
 关键指标：
-- `avg_latency`: 平均延迟
-- `avg_tokens_per_sec`: 平均吞吐量
-- `p50_latency`: P50 延迟
-- `p99_latency`: P99 延迟
+- `request_throughput`: 请求吞吐量 (req/s)
+- `input_throughput`: 输入吞吐量 (tok/s)
+- `output_throughput`: 输出吞吐量 (tok/s)
+- `mean_ttft_ms`: 平均首字延迟
+- `mean_e2e_latency_ms`: 平均端到端延迟
+- `concurrency`: bench 实测并发
 
 ### 性能分析结果
 
@@ -143,8 +161,10 @@ cat operator_analysis_report.txt
 ## 输出文件说明
 
 ### 基准测试
-- `benchmark_results.json` - JSON 格式的详细结果
-- `benchmark_log.txt` - 测试日志
+- `benchmark_results.json` - 封装后的完整结果，包含 server 配置和 bench 指标
+- `benchmark_results.sglang.raw.json` - `sglang.bench_serving` 原始输出
+- `benchmark_results.server.log` - `sglang.launch_server` 日志
+- `benchmark_log.txt` - benchmark 脚本自身日志
 
 ### 性能分析
 - `profile_results.json` - Profiler 结果
@@ -214,14 +234,16 @@ export MUSA_LAUNCH_BLOCKING=1  # 同步模式（调试时使用）
 
 ### 1. SGLang 无法加载
 - 检查 SGLang 是否正确安装
-- 当前脚本会自动兼容 `max_running_requests` 和 `max_num_reqs` 两种初始化参数
-- 如果仍然报 `ServerArgs.__init__() got an unexpected keyword argument ...`，说明开发环境里的 SGLang 分支接口又有变化，需要根据实际分支继续对齐参数名
-- 尝试使用 vLLM 后端进行对比测试
+- 当前脚本会直接调用 `python -m sglang.launch_server`
+- 如果报 `Can't load the configuration of ...`，说明 `--model-path` 还没有指到真正包含 `config.json` 的模型目录
+- 如果 `/health` 一直不返回 200，请检查 `benchmark_results.server.log`
+- 对照 MUSA 文档检查环境变量：`SGLANG_USE_MTT=1`、`MUSA_VISIBLE_DEVICES=all`、`TP_SOCKET_IFNAME=bond0`
 
 ### 2. MUSA 设备不可用
 - 检查 `torch_musa` 是否安装
 - 运行 `python -c "import torch_musa; print(torch.musa.is_available())"` 检查
-- 如果 vLLM 报 `Device string must not be empty`，优先显式传 `--device musa`
+- 如果是多卡环境，检查 `MUSA_VISIBLE_DEVICES`、`tensor-parallel-size` 与实际卡数是否匹配
+- 如果网络初始化失败，检查 `GLOO_SOCKET_IFNAME`、`TP_SOCKET_IFNAME`、`MCCL_IB_GID_INDEX`
 
 ### 3. 内存不足
 - 减少 `input-length` 或 `output-length`

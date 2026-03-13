@@ -53,7 +53,11 @@ python benchmark_sglang.py \
     --output-length "$OUTPUT_LENGTH" \
     --num-runs "$NUM_RUNS" \
     --warmup "$WARMUP" \
-    --backend both \
+    --backend sglang \
+    --dataset-name random \
+    --max-concurrency 64 \
+    --port 30001 \
+    --tensor-parallel-size 1 \
     --output "$RESULT_DIR/benchmark_results.json" \
     2>&1 | tee "$RESULT_DIR/benchmark_log.txt"
 
