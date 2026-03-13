@@ -28,9 +28,7 @@ RESOLVED_MODEL_PATH="$(resolve_model_dir "$MODEL_PATH")"
 DETECTED_MODEL_TYPE="$(detect_model_type "$RESOLVED_MODEL_PATH" "$MODEL_TYPE")"
 
 if [ -z "$DATASET_NAME" ]; then
-    if [ -n "$DATASET_PATH" ]; then
-        DATASET_NAME="sharegpt"
-    elif [ "$DETECTED_MODEL_TYPE" = "vl" ]; then
+    if [ "$DETECTED_MODEL_TYPE" = "vl" ]; then
         DATASET_NAME="random-image"
     else
         DATASET_NAME="random"

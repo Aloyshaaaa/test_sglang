@@ -75,7 +75,7 @@ Dense 模型如果要跑 ShareGPT：
 MODEL_PATH=/data/model/Qwen3-32B \
 MODEL_TYPE=dense \
 DATASET_PATH=/data/model/ShareGPT.json \
-DATASET_NAME=sharegpt \
+DATASET_NAME=random \
 TENSOR_PARALLEL_SIZE=8 \
 ./auto_benchmark.sh
 ```
@@ -260,16 +260,17 @@ TP_SOCKET_IFNAME=ens19f0np0 \
 
 - VL 模型默认走 `random-image`
 - Dense 模型默认走 `random`
-- 如果你要用真实对话数据，手动传：
-  - `DATASET_NAME=sharegpt`
+- Dense 模型如果你要复用本地 `ShareGPT.json` 做采样，优先传：
+  - `DATASET_NAME=random`
   - `DATASET_PATH=/data/model/ShareGPT.json`
+- 原因是当前一些 `sglang` 版本在 `DATASET_NAME=sharegpt` 路径上会进入 `sample_sharegpt_requests`，对 `tokenizer.bos_token` 做过强假设；而 `random + dataset-path` 会走另一条采样路径，更接近你给出的已知可跑脚本。
 
 ### 5. 离线环境跑 `ShareGPT`
 
 如果你的开发环境出不了公网，不要依赖 `bench_serving` 在线下载数据集，直接传本地文件：
 
 ```bash
-DATASET_NAME=sharegpt \
+DATASET_NAME=random \
 DATASET_PATH=/workspace/aloysha/ShareGPT.json \
 ./run_all_tests.sh
 ```
@@ -278,7 +279,7 @@ DATASET_PATH=/workspace/aloysha/ShareGPT.json \
 
 ### 6. 报 `TypeError: replace() argument 1 must be str, not None`
 
-这不是 `ShareGPT.json` 路径问题，而是开发环境里的 `sglang.bench_serving` 对 tokenizer 的 `bos_token` 做了过强假设。
+这不是 `ShareGPT.json` 路径问题，而是开发环境里的 `sglang.bench_serving` 在 `sharegpt` 采样路径上对 tokenizer 的 `bos_token` 做了过强假设。
 
 典型报错链路是：
 
@@ -289,6 +290,14 @@ TypeError: replace() argument 1 must be str, not None
 ```
 
 含义是当前模型对应的 tokenizer 没有字符串类型的 `bos_token`，但 `bench_serving.py` 直接做了 `replace()`。
+
+如果你只是想先跑通，而不是强依赖 `sharegpt` 这条路径，优先尝试：
+
+```bash
+DATASET_NAME=random \
+DATASET_PATH=/workspace/aloysha/ShareGPT.json \
+./run_all_tests.sh
+```
 
 这个仓库里已经附了一个最小补丁文件 [patches/sglang_bench_serving_bos_token.patch](/home/aloysha/aloysha/test_sglang/patches/sglang_bench_serving_bos_token.patch)。在你们的 `sglang` 开发仓库根目录执行：
 
