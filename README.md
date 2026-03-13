@@ -42,39 +42,40 @@ chmod +x run_all_tests.sh auto_benchmark.sh launch_server.sh run_benchmark.sh
 最基础的跑法：
 
 ```bash
-MODEL_PATH=/workspace/Qwen3-0.6B-FP8 \
 ./run_all_tests.sh
 ```
 
-Dense 模型使用本地 `ShareGPT.json` 做采样：
+这会优先使用内建 dense 预设：
+
+- `MODEL_PATH=/workspace/Qwen3-0.6B-FP8`
+- `DATASET_NAME=random`
+- `DATASET_PATH=/workspace/aloysha/ShareGPT.json`
+- 自动探测 `GLOO_SOCKET_IFNAME` / `TP_SOCKET_IFNAME`
+
+如果这些路径存在，就不需要再手工传。
+
+VL 模型直接跑：
 
 ```bash
-GLOO_SOCKET_IFNAME=ens19f0np0 \
-TP_SOCKET_IFNAME=ens19f0np0 \
-MODEL_PATH=/workspace/Qwen3-0.6B-FP8 \
-DATASET_NAME=random \
-DATASET_PATH=/workspace/aloysha/ShareGPT.json \
-./run_all_tests.sh
+./run_all_tests.sh vl
 ```
 
-VL 模型示例：
+这会优先使用内建 VL 预设：
 
-```bash
-MODEL_PATH=/data/model/Qwen2___5-VL-72B-Instruct \
-MODEL_TYPE=vl \
-INPUT_LENGTH=1024 \
-OUTPUT_LENGTH=1024 \
-NUM_PROMPTS=128 \
-MAX_CONCURRENCY=64 \
-TENSOR_PARALLEL_SIZE=8 \
-./auto_benchmark.sh
-```
+- `MODEL_PATH=/data/model/Qwen2___5-VL-72B-Instruct`
+- `MODEL_TYPE=vl`
+- `INPUT_LENGTH=1024`
+- `OUTPUT_LENGTH=1024`
+- `NUM_PROMPTS=128`
+- `MAX_CONCURRENCY=64`
+- `TENSOR_PARALLEL_SIZE=8`
 
 说明：
 
 - 如果脚本跑在容器里，`DATASET_PATH` 必须传容器内路径
 - `GLOO_SOCKET_IFNAME` 和 `TP_SOCKET_IFNAME` 可显式指定网卡；如果不传，脚本会自动探测默认路由网卡
 - 如果你已经手工起好了服务，可以传 `USE_EXISTING_SERVER=1`
+- 你显式传入的环境变量优先级更高，会覆盖内建预设
 
 ## 结果放在哪里
 

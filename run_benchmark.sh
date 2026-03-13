@@ -5,7 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/sglang_benchmark_common.sh"
 
-MODEL_PATH="${MODEL_PATH:-/workspace/models/Qwen3-0.6B}"
+apply_default_benchmark_profile
+
+MODEL_PATH="${MODEL_PATH:-}"
 PYTHON_EXECUTABLE="${PYTHON_EXECUTABLE:-python3}"
 SGLANG_PORT="${SGLANG_PORT:-30001}"
 INPUT_LENGTH="${INPUT_LENGTH:-3000}"

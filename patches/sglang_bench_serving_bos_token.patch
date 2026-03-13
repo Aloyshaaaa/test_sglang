@@ -1,8 +1,0 @@
-diff --git a/python/sglang/bench_serving.py b/python/sglang/bench_serving.py
---- a/python/sglang/bench_serving.py
-+++ b/python/sglang/bench_serving.py
-@@ -1113,1 +1113,3 @@
--        prompt = prompt.replace(tokenizer.bos_token, "")
-+        bos_token = getattr(tokenizer, "bos_token", None)
-+        if isinstance(bos_token, str) and bos_token:
-+            prompt = prompt.replace(bos_token, "")

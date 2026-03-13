@@ -46,6 +46,39 @@ resolve_model_dir() {
     dirname "${configs[0]}"
 }
 
+first_existing_path() {
+    local candidate=""
+    for candidate in "$@"; do
+        if [ -n "$candidate" ] && [ -e "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+detect_default_dense_model_path() {
+    first_existing_path \
+        /workspace/Qwen3-0.6B-FP8 \
+        /workspace/models/Qwen3-0.6B \
+        /data/model/Qwen3-0.6B-FP8 \
+        /data/model/Qwen3-0.6B
+}
+
+detect_default_vl_model_path() {
+    first_existing_path \
+        /data/model/Qwen2___5-VL-72B-Instruct \
+        /workspace/Qwen2___5-VL-72B-Instruct \
+        /workspace/models/Qwen2___5-VL-72B-Instruct
+}
+
+detect_default_sharegpt_path() {
+    first_existing_path \
+        /workspace/aloysha/ShareGPT.json \
+        /data/model/ShareGPT.json \
+        /workspace/ShareGPT.json
+}
+
 detect_model_type() {
     local model_path="$1"
     local requested_type="${2:-auto}"
@@ -66,6 +99,71 @@ detect_model_type() {
         *)
             echo "无效的 MODEL_TYPE: $requested_type，可选值: auto|dense|vl" >&2
             return 1
+            ;;
+    esac
+}
+
+apply_default_benchmark_profile() {
+    local requested_type="${MODEL_TYPE:-auto}"
+    local effective_type="$requested_type"
+    local detected_path=""
+
+    if [ -z "${MODEL_PATH:-}" ]; then
+        case "$requested_type" in
+            vl)
+                detected_path="$(detect_default_vl_model_path || true)"
+                ;;
+            dense)
+                detected_path="$(detect_default_dense_model_path || true)"
+                ;;
+            auto)
+                detected_path="$(detect_default_dense_model_path || true)"
+                if [ -z "$detected_path" ]; then
+                    detected_path="$(detect_default_vl_model_path || true)"
+                fi
+                ;;
+            *)
+                detected_path=""
+                ;;
+        esac
+
+        if [ -n "$detected_path" ]; then
+            export MODEL_PATH="$detected_path"
+        fi
+    fi
+
+    if [ "$requested_type" = "auto" ]; then
+        if [ -n "${MODEL_PATH:-}" ]; then
+            effective_type="$(detect_model_type "$MODEL_PATH" auto)"
+        else
+            effective_type="dense"
+        fi
+    fi
+
+    case "$effective_type" in
+        vl)
+            export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-8}"
+            export INPUT_LENGTH="${INPUT_LENGTH:-1024}"
+            export OUTPUT_LENGTH="${OUTPUT_LENGTH:-1024}"
+            export NUM_PROMPTS="${NUM_PROMPTS:-128}"
+            export MAX_CONCURRENCY="${MAX_CONCURRENCY:-64}"
+            export DATASET_NAME="${DATASET_NAME:-random-image}"
+            export RANDOM_IMAGE_NUM_IMAGES="${RANDOM_IMAGE_NUM_IMAGES:-1}"
+            export RANDOM_IMAGE_RESOLUTION="${RANDOM_IMAGE_RESOLUTION:-1148x112}"
+            ;;
+        dense|*)
+            export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
+            export INPUT_LENGTH="${INPUT_LENGTH:-3000}"
+            export OUTPUT_LENGTH="${OUTPUT_LENGTH:-500}"
+            export NUM_PROMPTS="${NUM_PROMPTS:-10}"
+            export MAX_CONCURRENCY="${MAX_CONCURRENCY:-64}"
+            export DATASET_NAME="${DATASET_NAME:-random}"
+            if [ -z "${DATASET_PATH:-}" ]; then
+                detected_path="$(detect_default_sharegpt_path || true)"
+                if [ -n "$detected_path" ]; then
+                    export DATASET_PATH="$detected_path"
+                fi
+            fi
             ;;
     esac
 }

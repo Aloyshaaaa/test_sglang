@@ -5,7 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/sglang_benchmark_common.sh"
 
-MODEL_PATH="${MODEL_PATH:-/workspace/models/Qwen3-0.6B}"
+apply_default_benchmark_profile
+
+MODEL_PATH="${MODEL_PATH:-}"
 PYTHON_EXECUTABLE="${PYTHON_EXECUTABLE:-python3}"
 SGLANG_PORT="${SGLANG_PORT:-30001}"
 HOST="${HOST:-0.0.0.0}"
@@ -50,6 +52,7 @@ export_default_server_env
 print_section "SGLang Auto Benchmark"
 echo "原始模型路径: $MODEL_PATH"
 echo "解析后模型目录: $RESOLVED_MODEL_PATH"
+echo "模型类型: $(detect_model_type "$RESOLVED_MODEL_PATH" "$MODEL_TYPE")"
 echo "GLOO 网卡: ${GLOO_SOCKET_IFNAME:-<未设置>}"
 echo "TP 网卡: ${TP_SOCKET_IFNAME:-<未设置>}"
 echo "结果目录: $RESULT_DIR"
