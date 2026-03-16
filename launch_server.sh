@@ -5,9 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/sglang_benchmark_common.sh"
 
-apply_default_benchmark_profile
-
-MODEL_PATH="${MODEL_PATH:-}"
+MODEL_PATH="${MODEL_PATH:-/workspace/models/Qwen3-0.6B}"
 PYTHON_EXECUTABLE="${PYTHON_EXECUTABLE:-python3}"
 SGLANG_PORT="${SGLANG_PORT:-30001}"
 HOST="${HOST:-0.0.0.0}"
@@ -49,7 +47,6 @@ fi
 
 print_section "SGLang Server Startup"
 echo "模型目录: $RESOLVED_MODEL_PATH"
-echo "模型类型: $(detect_model_type "$RESOLVED_MODEL_PATH" "${MODEL_TYPE:-auto}")"
 echo "监听地址: ${HOST}:${SGLANG_PORT}"
 echo "TP: $TENSOR_PARALLEL_SIZE"
 echo "GLOO 网卡: ${GLOO_SOCKET_IFNAME:-<未设置>}"
