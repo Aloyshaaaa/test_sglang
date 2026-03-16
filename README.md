@@ -46,12 +46,13 @@ MODEL_PATH=/workspace/Qwen3-0.6B-FP8 \
 ./run_all_tests.sh
 ```
 
-Dense 模型使用本地 `ShareGPT.json` 做采样：
+Dense 模型使用本地 `ShareGPT.json` 做采样（Qwen3-32B-FP8 八卡示例）：
 
 ```bash
 GLOO_SOCKET_IFNAME=ens19f0np0 \
 TP_SOCKET_IFNAME=ens19f0np0 \
-MODEL_PATH=/workspace/Qwen3-0.6B-FP8 \
+MODEL_PATH=/workspace/mochi/models/Qwen3-32B-FP8 \
+TENSOR_PARALLEL_SIZE=8 \
 DATASET_NAME=random \
 DATASET_PATH=/workspace/aloysha/ShareGPT.json \
 ./run_all_tests.sh
