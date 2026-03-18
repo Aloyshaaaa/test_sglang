@@ -424,7 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-prompts", dest="num_prompts", type=int, help="压测请求数")
     parser.add_argument("--warmup", dest="warmup_requests", type=int, default=2, help="兼容旧参数名，等价于 --warmup-requests")
     parser.add_argument("--warmup-requests", dest="warmup_requests", type=int, help="bench_serving warmup 请求数")
-    parser.add_argument("--backend", type=str, default="sglang", choices=["sglang", "vllm", "both"], help="保留旧接口；当前文档流仅实现 sglang")
+    parser.add_argument("--backend", type=str, default="sglang", choices=["sglang", "vllm", "both"], help="保留旧接口；vllm 请改用 launch_vllm_server.sh + run_vllm_benchmark.sh")
     parser.add_argument("--output", type=str, default="benchmark_results.json", help="输出结果文件")
 
     parser.add_argument("--python-executable", type=str, default=sys.executable, help="用于启动 server 和 bench 的 Python")
@@ -482,10 +482,10 @@ def main() -> None:
         all_results["vllm"] = {
             "backend": "vllm",
             "skipped": True,
-            "reason": "当前脚本已按 SGLang MUSA 文档改为 launch_server + bench_serving 流程，未实现 vLLM 服务流。",
+            "reason": "当前脚本未实现 vLLM 服务流；请改用 launch_vllm_server.sh + run_vllm_benchmark.sh。",
         }
         if args.backend == "vllm":
-            print("vLLM 基准测试未实现；当前脚本仅对齐 SGLang MUSA 文档流。")
+            print("vLLM 基准测试未在这个入口实现；请改用 launch_vllm_server.sh + run_vllm_benchmark.sh。")
 
     if not all_results:
         raise SystemExit("没有可执行的 benchmark backend。")

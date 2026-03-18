@@ -22,6 +22,10 @@
   - 只负责启动 `sglang.launch_server`
 - `run_benchmark.sh`
   - 只负责执行 `sglang.bench_serving`
+- `launch_vllm_server.sh`
+  - 只负责启动 `vllm serve`
+- `run_vllm_benchmark.sh`
+  - 只负责执行 `vllm bench serve`
 - `sglang_benchmark_common.sh`
   - 公共函数和默认环境变量
 - `benchmark_sglang.py`
@@ -36,7 +40,7 @@
 先给脚本执行权限：
 
 ```bash
-chmod +x run_all_tests.sh auto_benchmark.sh launch_server.sh run_benchmark.sh
+chmod +x run_all_tests.sh auto_benchmark.sh launch_server.sh run_benchmark.sh launch_vllm_server.sh run_vllm_benchmark.sh
 ```
 
 最基础的跑法：
@@ -46,6 +50,15 @@ MODEL_PATH=/workspace/Qwen3-0.6B-FP8 \
 ./run_all_tests.sh
 ```
 
+现在 `run_all_tests.sh` 默认会做一轮单模型 sweep：
+
+- `INPUT_LENGTH=3500`
+- `OUTPUT_LENGTH=1500`
+- `MAX_CONCURRENCY=NUM_PROMPTS`
+- 档位依次为 `1,2,4,8,16,32,50,64,100,128,256`
+
+也就是说，你只要指定一个模型路径，就会起一次服务，然后把这 11 档顺序全跑完。
+
 Dense 模型使用本地 `ShareGPT.json` 做采样（Qwen3-32B-FP8 八卡示例）：
 
 ```bash
@@ -53,8 +66,30 @@ GLOO_SOCKET_IFNAME=ens19f0np0 \
 TP_SOCKET_IFNAME=ens19f0np0 \
 MODEL_PATH=/workspace/mochi/models/Qwen3-32B-FP8 \
 TENSOR_PARALLEL_SIZE=8 \
-DATASET_NAME=random \
+DATASET_NAME=sharegpt \
 DATASET_PATH=/workspace/aloysha/ShareGPT.json \
+./run_all_tests.sh
+```
+
+如果你只想跑单个固定档位，不做 sweep，可以显式切回单次模式：
+
+```bash
+GLOO_SOCKET_IFNAME=ens19f0np0 \
+TP_SOCKET_IFNAME=ens19f0np0 \
+MODEL_PATH=/workspace/mochi/models/Qwen3-32B-FP8 \
+TENSOR_PARALLEL_SIZE=8 \
+DATASET_NAME=sharegpt \
+DATASET_PATH=/workspace/aloysha/ShareGPT.json \
+BENCHMARK_MODE=single \
+NUM_PROMPTS=64 \
+MAX_CONCURRENCY=64 \
+./run_all_tests.sh
+```
+
+如果你后面还想改 sweep 档位，可以直接覆盖：
+
+```bash
+SWEEP_VALUES=1,2,4,8,16,32,64 \
 ./run_all_tests.sh
 ```
 
@@ -67,6 +102,7 @@ INPUT_LENGTH=1024 \
 OUTPUT_LENGTH=1024 \
 NUM_PROMPTS=128 \
 MAX_CONCURRENCY=64 \
+BENCHMARK_MODE=single \
 TENSOR_PARALLEL_SIZE=8 \
 ./auto_benchmark.sh
 ```
@@ -90,9 +126,15 @@ results/benchmark_时间戳/
 - `server.log`
   - `sglang.launch_server` 日志
 - `bench.log`
-  - `sglang.bench_serving` 控制台输出
+  - 单次模式下的 `sglang.bench_serving` 控制台输出
 - `bench_raw.json`
-  - `bench_serving --output-file` 生成的原始 JSON
+  - 单次模式下 `bench_serving --output-file` 生成的原始 JSON
+- `sweep_summary.csv`
+  - sweep 模式下每个档位的结果文件索引
+- `case_*/bench.log`
+  - sweep 模式下每个档位各自的压测日志
+- `case_*/bench_raw.json`
+  - sweep 模式下每个档位各自的原始 JSON
 - `run_config.env`
   - 本次运行的参数快照
 
