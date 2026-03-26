@@ -236,6 +236,7 @@ if curl -fsS "http://${HEALTH_HOST}:${SGLANG_PORT}/health" >/dev/null 2>&1; then
 fi
 
 if [ "$USE_EXISTING_SERVER" != "1" ]; then
+    run_sglang_runtime_preflight "$PYTHON_EXECUTABLE"
     print_section "Start Server"
     (
         export MODEL_PATH="$RESOLVED_MODEL_PATH"

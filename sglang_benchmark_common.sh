@@ -137,6 +137,75 @@ export_default_server_env() {
     fi
 }
 
+run_sglang_runtime_preflight() {
+    local python_executable="${1:-python3}"
+    local skip_preflight="${SKIP_RUNTIME_PREFLIGHT:-0}"
+
+    if [ "$skip_preflight" = "1" ]; then
+        return 0
+    fi
+
+    "$python_executable" - <<'PY'
+import importlib
+import importlib.util
+import sys
+from pathlib import Path
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+sglang_spec = importlib.util.find_spec("sglang")
+if sglang_spec is None or sglang_spec.origin is None:
+    fail(
+        f"错误: 当前 Python 环境未安装 sglang: {sys.executable}\n"
+        "请先确认运行容器/虚拟环境里的 sglang 安装是否完整。"
+    )
+
+sglang_root = Path(sglang_spec.origin).resolve().parent
+fp8_utils = "sglang.srt.layers.quantization.fp8_utils"
+has_mtt = importlib.util.find_spec("mtt_torch_ext") is not None
+
+try:
+    importlib.import_module(fp8_utils)
+except ModuleNotFoundError as exc:
+    if exc.name == "mtt_torch_ext":
+        fail(
+            "错误: 当前 sglang 运行时在导入量化模块时依赖 mtt_torch_ext，但运行环境里缺少该模块。\n"
+            f"sglang 包路径: {sglang_root}\n"
+            f"导入模块: {fp8_utils}\n"
+            "这属于外部 sglang 运行环境问题，不是本仓库脚本参数问题。\n"
+            "请安装与当前 sglang/MUSA 版本匹配的 mtt_torch_ext，或切换到不硬依赖它的 sglang 包。\n"
+            "如需跳过该预检，可显式设置 SKIP_RUNTIME_PREFLIGHT=1。"
+        )
+    raise
+except Exception:
+    if not has_mtt:
+        fp8_utils_path = sglang_root / "srt" / "layers" / "quantization" / "fp8_utils.py"
+        try:
+            fp8_utils_text = (
+                fp8_utils_path.read_text(encoding="utf-8", errors="ignore")
+                if fp8_utils_path.is_file()
+                else ""
+            )
+        except OSError as exc:
+            fail(f"错误: 无法读取 {fp8_utils_path}: {exc}")
+
+        if "mtt_torch_ext" in fp8_utils_text:
+            fail(
+                "错误: 检测到当前 sglang 安装包硬依赖 mtt_torch_ext，但运行环境里缺少该模块。\n"
+                f"sglang 包路径: {sglang_root}\n"
+                f"检查文件: {fp8_utils_path}\n"
+                "这属于外部 sglang 运行环境问题，不是本仓库脚本参数问题。\n"
+                "请安装与当前 sglang/MUSA 版本匹配的 mtt_torch_ext，或切换到不硬依赖它的 sglang 包。\n"
+                "如需跳过该预检，可显式设置 SKIP_RUNTIME_PREFLIGHT=1。"
+            )
+    raise
+PY
+}
+
 wait_for_health() {
     local health_host="$1"
     local port="$2"

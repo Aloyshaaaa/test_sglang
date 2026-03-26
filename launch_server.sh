@@ -20,6 +20,7 @@ DISABLE_OVERLAP_SCHEDULE="${DISABLE_OVERLAP_SCHEDULE:-1}"
 
 RESOLVED_MODEL_PATH="$(resolve_model_dir "$MODEL_PATH")"
 export_default_server_env
+run_sglang_runtime_preflight "$PYTHON_EXECUTABLE"
 
 cmd=(
     "$PYTHON_EXECUTABLE" -m sglang.launch_server
