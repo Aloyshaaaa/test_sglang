@@ -161,6 +161,10 @@ def build_server_command(args, model_path: str) -> list[str]:
         args.attention_backend,
     ]
 
+    if args.prefill_attention_backend:
+        cmd.extend(["--prefill-attention-backend", args.prefill_attention_backend])
+    if args.decode_attention_backend:
+        cmd.extend(["--decode-attention-backend", args.decode_attention_backend])
     if args.trust_remote_code:
         cmd.append("--trust-remote-code")
     if args.disable_radix_cache:
@@ -442,6 +446,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mem-fraction-static", type=float, default=0.9, help="launch_server --mem-fraction-static")
     parser.add_argument("--cuda-graph-max-bs", type=int, default=256, help="launch_server --cuda-graph-max-bs")
     parser.add_argument("--attention-backend", type=str, default="fa3", help="launch_server --attention-backend")
+    parser.add_argument("--prefill-attention-backend", type=str, default=None, help="可选的 launch_server --prefill-attention-backend")
+    parser.add_argument("--decode-attention-backend", type=str, default=None, help="可选的 launch_server --decode-attention-backend")
     parser.add_argument("--max-prefill-tokens", type=int, default=None, help="可选的 launch_server --max-prefill-tokens")
     parser.add_argument("--disable-cuda-graph", action="store_true", help="launch_server --disable-cuda-graph")
     parser.add_argument("--server-env", action="append", default=[], metavar="KEY=VALUE", help="附加或覆盖 server 环境变量")

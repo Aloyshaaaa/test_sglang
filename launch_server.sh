@@ -13,6 +13,8 @@ TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.9}"
 CUDA_GRAPH_MAX_BS="${CUDA_GRAPH_MAX_BS:-256}"
 ATTENTION_BACKEND="${ATTENTION_BACKEND:-fa3}"
+PREFILL_ATTENTION_BACKEND="${PREFILL_ATTENTION_BACKEND:-}"
+DECODE_ATTENTION_BACKEND="${DECODE_ATTENTION_BACKEND:-}"
 MAX_PREFILL_TOKENS="${MAX_PREFILL_TOKENS:-}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-1}"
 DISABLE_RADIX_CACHE="${DISABLE_RADIX_CACHE:-1}"
@@ -34,6 +36,12 @@ cmd=(
     --attention-backend "$ATTENTION_BACKEND"
 )
 
+if [ -n "$PREFILL_ATTENTION_BACKEND" ]; then
+    cmd+=(--prefill-attention-backend "$PREFILL_ATTENTION_BACKEND")
+fi
+if [ -n "$DECODE_ATTENTION_BACKEND" ]; then
+    cmd+=(--decode-attention-backend "$DECODE_ATTENTION_BACKEND")
+fi
 if [ "$TRUST_REMOTE_CODE" = "1" ]; then
     cmd+=(--trust-remote-code)
 fi
@@ -55,6 +63,8 @@ echo "模型目录: $RESOLVED_MODEL_PATH"
 echo "监听地址: ${HOST}:${SGLANG_PORT}"
 echo "TP: $TENSOR_PARALLEL_SIZE"
 echo "禁用 CUDA Graph: $DISABLE_CUDA_GRAPH"
+echo "Prefill Attention Backend: ${PREFILL_ATTENTION_BACKEND:-<默认>}"
+echo "Decode Attention Backend: ${DECODE_ATTENTION_BACKEND:-<默认>}"
 echo "GLOO 网卡: ${GLOO_SOCKET_IFNAME:-<未设置>}"
 echo "TP 网卡: ${TP_SOCKET_IFNAME:-<未设置>}"
 echo "命令: ${cmd[*]}"

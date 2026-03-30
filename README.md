@@ -100,6 +100,33 @@ DISABLE_CUDA_GRAPH=1 \
 ./run_all_tests.sh
 ```
 
+如果禁用 CUDA graph 以后，服务能启动但真实请求阶段仍然在 `fa3` attention backend 报 `is_varlen_q must be equal to is_varlen_k`，可以先手工切换到更保守的 attention backend 验证：
+
+```bash
+python -m sglang.launch_server \
+  --model /home/mccxadmin/kayce/models/Qwen2.5-0.5B \
+  --host 0.0.0.0 \
+  --port 30001 \
+  --tensor-parallel-size 1 \
+  --mem-fraction-static 0.9 \
+  --disable-cuda-graph \
+  --prefill-attention-backend torch_native \
+  --decode-attention-backend torch_native \
+  --trust-remote-code
+```
+
+如果上面命令能正常处理 `/generate` 请求，通常说明问题在镜像内 `fa3/MUSA` 的 attention 运行时兼容性，而不是本仓库脚本参数本身。
+
+如果你希望继续使用仓库里的默认入口，也可以直接通过环境变量让 `./run_all_tests.sh` 带上这组更稳定的参数：
+
+```bash
+MODEL_PATH=/home/mccxadmin/kayce/models/Qwen2.5-0.5B \
+DISABLE_CUDA_GRAPH=1 \
+PREFILL_ATTENTION_BACKEND=torch_native \
+DECODE_ATTENTION_BACKEND=torch_native \
+./run_all_tests.sh
+```
+
 VL 模型示例：
 
 ```bash
