@@ -17,6 +17,7 @@ MAX_PREFILL_TOKENS="${MAX_PREFILL_TOKENS:-}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-1}"
 DISABLE_RADIX_CACHE="${DISABLE_RADIX_CACHE:-1}"
 DISABLE_OVERLAP_SCHEDULE="${DISABLE_OVERLAP_SCHEDULE:-1}"
+DISABLE_CUDA_GRAPH="${DISABLE_CUDA_GRAPH:-0}"
 
 RESOLVED_MODEL_PATH="$(resolve_model_dir "$MODEL_PATH")"
 export_default_server_env
@@ -42,6 +43,9 @@ fi
 if [ "$DISABLE_OVERLAP_SCHEDULE" = "1" ]; then
     cmd+=(--disable-overlap-schedule)
 fi
+if [ "$DISABLE_CUDA_GRAPH" = "1" ]; then
+    cmd+=(--disable-cuda-graph)
+fi
 if [ -n "$MAX_PREFILL_TOKENS" ]; then
     cmd+=(--max-prefill-tokens "$MAX_PREFILL_TOKENS")
 fi
@@ -50,6 +54,7 @@ print_section "SGLang Server Startup"
 echo "模型目录: $RESOLVED_MODEL_PATH"
 echo "监听地址: ${HOST}:${SGLANG_PORT}"
 echo "TP: $TENSOR_PARALLEL_SIZE"
+echo "禁用 CUDA Graph: $DISABLE_CUDA_GRAPH"
 echo "GLOO 网卡: ${GLOO_SOCKET_IFNAME:-<未设置>}"
 echo "TP 网卡: ${TP_SOCKET_IFNAME:-<未设置>}"
 echo "命令: ${cmd[*]}"

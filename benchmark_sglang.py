@@ -167,6 +167,8 @@ def build_server_command(args, model_path: str) -> list[str]:
         cmd.append("--disable-radix-cache")
     if args.disable_overlap_schedule:
         cmd.append("--disable-overlap-schedule")
+    if args.disable_cuda_graph:
+        cmd.append("--disable-cuda-graph")
     if args.max_prefill_tokens is not None:
         cmd.extend(["--max-prefill-tokens", str(args.max_prefill_tokens)])
     return cmd
@@ -441,6 +443,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cuda-graph-max-bs", type=int, default=256, help="launch_server --cuda-graph-max-bs")
     parser.add_argument("--attention-backend", type=str, default="fa3", help="launch_server --attention-backend")
     parser.add_argument("--max-prefill-tokens", type=int, default=None, help="可选的 launch_server --max-prefill-tokens")
+    parser.add_argument("--disable-cuda-graph", action="store_true", help="launch_server --disable-cuda-graph")
     parser.add_argument("--server-env", action="append", default=[], metavar="KEY=VALUE", help="附加或覆盖 server 环境变量")
 
     parser.add_argument("--dataset-name", type=str, default="random", choices=["random", "random-image", "sharegpt"], help="bench_serving 数据集类型")

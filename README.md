@@ -93,6 +93,13 @@ SWEEP_VALUES=1,2,4,8,16,32,64 \
 ./run_all_tests.sh
 ```
 
+如果 MUSA 环境在服务启动阶段卡在 `Capture cuda graph`，或者日志里出现 `is_varlen_q must be equal to is_varlen_k`，可以先禁用 CUDA graph 验证：
+
+```bash
+DISABLE_CUDA_GRAPH=1 \
+./run_all_tests.sh
+```
+
 VL 模型示例：
 
 ```bash
