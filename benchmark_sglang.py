@@ -186,6 +186,8 @@ def build_bench_command(args, model_path: str, raw_output_file: str) -> list[str
         "sglang.bench_serving",
         "--backend",
         "sglang",
+        "--host",
+        args.bench_host,
         "--port",
         str(args.port),
         "--model",
@@ -396,6 +398,7 @@ def benchmark_sglang(args, model_path: str) -> dict:
                 "launch_command": quote_command(server_command),
             },
             "benchmark_config": {
+                "host": args.bench_host,
                 "num_prompts": args.num_prompts,
                 "input_length": args.input_length,
                 "output_length": args.output_length,
@@ -436,6 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python-executable", type=str, default=sys.executable, help="用于启动 server 和 bench 的 Python")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="SGLang server host")
     parser.add_argument("--health-host", type=str, default="127.0.0.1", help="health check 使用的 host")
+    parser.add_argument("--bench-host", type=str, default=None, help="bench_serving 连接服务使用的 host，默认跟随 --health-host")
     parser.add_argument("--port", type=int, default=30001, help="SGLang server 端口")
     parser.add_argument("--server-timeout", type=int, default=2400, help="等待 server ready 的超时时间（秒）")
     parser.add_argument("--server-log", type=str, default=None, help="服务日志文件路径")
@@ -480,6 +484,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if args.bench_host is None:
+        args.bench_host = args.health_host
 
     model_path = resolve_model_path(args.model_path)
     all_results = {}

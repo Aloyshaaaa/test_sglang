@@ -206,6 +206,57 @@ except Exception:
 PY
 }
 
+run_sharegpt_bos_token_preflight() {
+    local python_executable="${1:-python3}"
+    local patch_file_path="$2"
+    local skip_preflight="${SKIP_BENCH_BOS_TOKEN_PREFLIGHT:-0}"
+
+    if [ "$skip_preflight" = "1" ]; then
+        return 0
+    fi
+
+    PATCH_FILE_PATH="$patch_file_path" "$python_executable" - <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+spec = importlib.util.find_spec("sglang.bench_serving")
+if spec is None or spec.origin is None:
+    fail(
+        f"错误: 当前 Python 环境未安装 sglang.bench_serving: {sys.executable}\n"
+        "请先确认运行容器/虚拟环境里的 sglang 安装是否完整。"
+    )
+
+bench_path = Path(spec.origin).resolve()
+try:
+    bench_text = bench_path.read_text(encoding="utf-8", errors="ignore")
+except OSError as exc:
+    fail(f"错误: 无法读取 {bench_path}: {exc}")
+
+unsafe_snippet = 'prompt = prompt.replace(tokenizer.bos_token, "")'
+safe_snippet = 'bos_token = getattr(tokenizer, "bos_token", None)'
+
+if unsafe_snippet in bench_text and safe_snippet not in bench_text:
+    patch_path = os.environ.get("PATCH_FILE_PATH", "")
+    fail(
+        "错误: 当前 sglang.bench_serving 仍包含未修复的 bos_token 处理逻辑。\n"
+        f"检查文件: {bench_path}\n"
+        "这属于外部 SGLang 代码兼容性问题，不是本仓库测试脚本参数问题。\n"
+        "当 tokenizer.bos_token 为 None 时，ShareGPT 压测会在 sample_sharegpt_requests 阶段报错:\n"
+        "TypeError: replace() argument 1 must be str, not None\n"
+        f"请在外部 SGLang 代码树应用补丁: patch -p1 < {patch_path}\n"
+        "如需跳过该预检，可显式设置 SKIP_BENCH_BOS_TOKEN_PREFLIGHT=1。"
+    )
+PY
+}
+
 wait_for_health() {
     local health_host="$1"
     local port="$2"

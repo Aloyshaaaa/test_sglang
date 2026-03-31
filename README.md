@@ -54,7 +54,7 @@ MODEL_PATH=/workspace/Qwen3-0.6B-FP8 \
 
 - `INPUT_LENGTH=3500`
 - `OUTPUT_LENGTH=1500`
-- `MAX_CONCURRENCY=NUM_PROMPTS`
+- `NUM_PROMPTS = 2 * MAX_CONCURRENCY`
 - 档位依次为 `1,2,4,8,16,32,50,64,100,128,256`
 
 也就是说，你只要指定一个模型路径，就会起一次服务，然后把这 11 档顺序全跑完。
@@ -71,6 +71,8 @@ DATASET_PATH=/workspace/aloysha/ShareGPT.json \
 ./run_all_tests.sh
 ```
 
+如果当前容器里的外部 `sglang.bench_serving` 仍包含未修复的 `tokenizer.bos_token` 处理逻辑，仓库脚本会在真正开跑前直接报错，并提示你应用仓库内补丁 [patches/sglang_bench_serving_bos_token.patch](/home/aloysha/aloysha/test_sglang/patches/sglang_bench_serving_bos_token.patch)。
+
 如果你只想跑单个固定档位，不做 sweep，可以显式切回单次模式：
 
 ```bash
@@ -81,10 +83,11 @@ TENSOR_PARALLEL_SIZE=8 \
 DATASET_NAME=sharegpt \
 DATASET_PATH=/workspace/aloysha/ShareGPT.json \
 BENCHMARK_MODE=single \
-NUM_PROMPTS=64 \
 MAX_CONCURRENCY=64 \
 ./run_all_tests.sh
 ```
+
+说明：当前脚本会自动把 `NUM_PROMPTS` 设为 `MAX_CONCURRENCY` 的两倍；上例里会实际使用 `NUM_PROMPTS=128`。
 
 如果你后面还想改 sweep 档位，可以直接覆盖：
 
@@ -127,6 +130,14 @@ DECODE_ATTENTION_BACKEND=torch_native \
 ./run_all_tests.sh
 ```
 
+地址约定：
+
+- `HOST` 只用于 `sglang.launch_server` 的监听地址，默认 `0.0.0.0`
+- `HEALTH_HOST` 用于 `/health` 检查，默认 `127.0.0.1`
+- `BENCH_HOST` 用于 `sglang.bench_serving` 真正发请求的目标地址，默认跟随 `HEALTH_HOST`
+
+因此，看到服务监听在 `0.0.0.0:30001` 是正常的；但压测客户端不应该去连接 `0.0.0.0:30001`，而应该连 `127.0.0.1:30001` 或你实际可达的服务地址。
+
 VL 模型示例：
 
 ```bash
@@ -134,7 +145,6 @@ MODEL_PATH=/data/model/Qwen2___5-VL-72B-Instruct \
 MODEL_TYPE=vl \
 INPUT_LENGTH=1024 \
 OUTPUT_LENGTH=1024 \
-NUM_PROMPTS=128 \
 MAX_CONCURRENCY=64 \
 BENCHMARK_MODE=single \
 TENSOR_PARALLEL_SIZE=8 \

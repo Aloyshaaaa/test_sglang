@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/sglang_benchmark_common.sh"
 MODEL_PATH="${MODEL_PATH:-/workspace/models/Qwen3-0.6B}"
 PYTHON_EXECUTABLE="${PYTHON_EXECUTABLE:-python3}"
 SGLANG_PORT="${SGLANG_PORT:-30001}"
+BENCH_HOST="${BENCH_HOST:-${HEALTH_HOST:-127.0.0.1}}"
 INPUT_LENGTH="${INPUT_LENGTH:-3500}"
 OUTPUT_LENGTH="${OUTPUT_LENGTH:-1500}"
 NUM_PROMPTS="${NUM_PROMPTS:-10}"
@@ -44,10 +45,16 @@ if [ -n "$DATASET_PATH" ] && [ ! -f "$DATASET_PATH" ]; then
     echo "如果你在容器里运行脚本，这里必须传容器内路径，而不是宿主机路径。" >&2
     exit 1
 fi
+if [ "$DATASET_NAME" = "sharegpt" ]; then
+    run_sharegpt_bos_token_preflight \
+        "$PYTHON_EXECUTABLE" \
+        "${SCRIPT_DIR}/patches/sglang_bench_serving_bos_token.patch"
+fi
 
 cmd=(
     "$PYTHON_EXECUTABLE" -u -m sglang.bench_serving
     --backend sglang
+    --host "$BENCH_HOST"
     --port "$SGLANG_PORT"
     --model "$RESOLVED_MODEL_PATH"
     --num-prompts "$NUM_PROMPTS"
@@ -84,6 +91,7 @@ echo "数据集: $DATASET_NAME"
 if [ -n "$DATASET_PATH" ]; then
     echo "数据集路径: $DATASET_PATH"
 fi
+echo "连接地址: ${BENCH_HOST}:${SGLANG_PORT}"
 echo "输入长度: $INPUT_LENGTH"
 echo "输出长度: $OUTPUT_LENGTH"
 echo "请求数: $NUM_PROMPTS"

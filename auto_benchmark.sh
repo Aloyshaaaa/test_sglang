@@ -10,6 +10,7 @@ PYTHON_EXECUTABLE="${PYTHON_EXECUTABLE:-python3}"
 SGLANG_PORT="${SGLANG_PORT:-30001}"
 HOST="${HOST:-0.0.0.0}"
 HEALTH_HOST="${HEALTH_HOST:-127.0.0.1}"
+BENCH_HOST="${BENCH_HOST:-$HEALTH_HOST}"
 SERVER_TIMEOUT="${SERVER_TIMEOUT:-2400}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.9}"
@@ -77,6 +78,7 @@ PYTHON_EXECUTABLE=$PYTHON_EXECUTABLE
 SGLANG_PORT=$SGLANG_PORT
 HOST=$HOST
 HEALTH_HOST=$HEALTH_HOST
+BENCH_HOST=$BENCH_HOST
 SERVER_TIMEOUT=$SERVER_TIMEOUT
 TENSOR_PARALLEL_SIZE=$TENSOR_PARALLEL_SIZE
 MEM_FRACTION_STATIC=$MEM_FRACTION_STATIC
@@ -123,13 +125,20 @@ validate_benchmark_mode() {
 run_benchmark_case() {
     local bench_log_file="$1"
     local raw_output_file="$2"
-    local case_num_prompts="$3"
-    local case_max_concurrency="$4"
+    local case_max_concurrency="$3"
+    local case_num_prompts=""
+
+    if ! [[ "$case_max_concurrency" =~ ^[0-9]+$ ]] || [ "$case_max_concurrency" -le 0 ]; then
+        echo "MAX_CONCURRENCY 必须是正整数，当前值: $case_max_concurrency" >&2
+        return 1
+    fi
+    case_num_prompts="$((case_max_concurrency * 2))"
 
     (
         export MODEL_PATH="$RESOLVED_MODEL_PATH"
         export PYTHON_EXECUTABLE
         export SGLANG_PORT
+        export BENCH_HOST
         export INPUT_LENGTH
         export OUTPUT_LENGTH
         export NUM_PROMPTS="$case_num_prompts"
@@ -194,14 +203,15 @@ run_benchmark_sweep() {
 
     for value in "${sweep_values[@]}"; do
         case_index=$((case_index + 1))
-        printf -v case_name 'case_%03d_c%s_n%s' "$case_index" "$value" "$value"
+        local current_num_prompts="$((value * 2))"
+        printf -v case_name 'case_%03d_c%s_n%s' "$case_index" "$value" "$current_num_prompts"
         case_dir="${RESULT_DIR}/${case_name}"
         case_bench_log="${case_dir}/bench.log"
         case_raw_output="${case_dir}/bench_raw.json"
         mkdir -p "$case_dir"
 
-        echo "[$case_index/$total_cases] MAX_CONCURRENCY=$value NUM_PROMPTS=$value"
-        if run_benchmark_case "$case_bench_log" "$case_raw_output" "$value" "$value"; then
+        echo "[$case_index/$total_cases] MAX_CONCURRENCY=$value NUM_PROMPTS=$current_num_prompts"
+        if run_benchmark_case "$case_bench_log" "$case_raw_output" "$value"; then
             status="completed"
         else
             status="failed"
@@ -210,7 +220,7 @@ run_benchmark_sweep() {
         printf '%s,%s,%s,%s,%s,%s,%s\n' \
             "$case_index" \
             "$value" \
-            "$value" \
+            "$current_num_prompts" \
             "$status" \
             "$case_dir" \
             "$case_bench_log" \
@@ -294,7 +304,7 @@ if [ "$BENCHMARK_MODE" = "sweep" ]; then
     run_benchmark_sweep
 else
     print_section "Run Benchmark"
-    run_benchmark_case "$BENCH_LOG_FILE" "$RAW_OUTPUT_FILE" "$NUM_PROMPTS" "$MAX_CONCURRENCY"
+    run_benchmark_case "$BENCH_LOG_FILE" "$RAW_OUTPUT_FILE" "$MAX_CONCURRENCY"
 fi
 
 print_section "Completed"
